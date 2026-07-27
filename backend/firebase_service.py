@@ -94,8 +94,18 @@ else:
                     db = firestore.client()
                     logger.info("✅ Firebase initialized com credentials file")
                 else:
-                    logger.warning("⚠️  firebase_credentials.json não encontrado e FIREBASE_CREDENTIALS não definido! Rodando em modo offline.")
-                    db = None
+                    # Cloud Run / GCP Application Default Credentials
+                    try:
+                        creds = credentials.ApplicationDefault()
+                        firebase_admin.initialize_app(creds, storage_options)
+                        db = firestore.client()
+                        logger.info("✅ Firebase initialized com Application Default Credentials")
+                    except Exception as adc_exc:
+                        logger.warning(
+                            "⚠️  Sem credentials file/env/ADC (%s). Rodando em modo offline.",
+                            adc_exc,
+                        )
+                        db = None
         except Exception as e:
             logger.error(f"❌ Firebase initialization failed: {e}")
             db = None

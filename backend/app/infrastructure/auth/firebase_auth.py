@@ -26,17 +26,26 @@ def _init_firebase() -> bool:
             _firebase_initialized = True
             return True
 
+        options = {"storageBucket": FIREBASE_STORAGE_BUCKET} if FIREBASE_STORAGE_BUCKET else None
         cred_path = Path(__file__).resolve().parents[2] / "firebase_credentials.json"
-        if FIREBASE_CREDENTIALS:
-            info = json.loads(FIREBASE_CREDENTIALS)
-            cred = credentials.Certificate(info)
+
+        if FIREBASE_CREDENTIALS and FIREBASE_CREDENTIALS.strip().startswith("{"):
+            try:
+                info = json.loads(FIREBASE_CREDENTIALS)
+                cred = credentials.Certificate(info)
+                firebase_admin.initialize_app(cred, options)
+            except json.JSONDecodeError:
+                logger.warning("FIREBASE_CREDENTIALS JSON inválido — tentando ADC")
+                cred = credentials.ApplicationDefault()
+                firebase_admin.initialize_app(cred, options)
         elif cred_path.is_file():
             cred = credentials.Certificate(str(cred_path))
+            firebase_admin.initialize_app(cred, options)
         else:
-            return False
+            # Cloud Run / GCP: Application Default Credentials
+            cred = credentials.ApplicationDefault()
+            firebase_admin.initialize_app(cred, options)
 
-        options = {"storageBucket": FIREBASE_STORAGE_BUCKET} if FIREBASE_STORAGE_BUCKET else None
-        firebase_admin.initialize_app(cred, options)
         _firebase_initialized = True
         logger.info("Firebase Admin inicializado (bucket=%s)", FIREBASE_STORAGE_BUCKET or "default")
         return True
