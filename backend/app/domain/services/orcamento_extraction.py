@@ -15,6 +15,13 @@ from fastapi import HTTPException
 from services.hybrid_extraction import merge_parser_as_primary
 from services.openai_service import OpenAIServiceError, process_selected_table
 
+from app.domain.abc_curve import (
+    build_abc_summary,
+    classify_abc_items,
+    enrich_item_pricing_and_type,
+    infer_tipo_linha,
+)
+from app.domain.money import parse_brl, sanitize_bdi_percent
 from app.infrastructure.storage.table_cache_store import TableCacheStore
 from app.infrastructure.storage.upload_store import UploadStore
 
@@ -31,56 +38,11 @@ _SUBTOTAL_KEYWORDS = (
 
 
 def _coerce_number(value: Any) -> float:
-    if value is None or value == "":
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip().replace("R$", "").replace("$", "").replace(" ", "")
-    if "." in text and "," in text:
-        text = text.replace(".", "").replace(",", ".")
-    elif "," in text and "." not in text:
-        text = text.replace(",", ".")
-    try:
-        return float(text)
-    except (TypeError, ValueError):
-        return 0.0
+    return parse_brl(value)
 
 
 def _coerce_bdi(value: Any) -> float:
-    if isinstance(value, str):
-        raw = _coerce_number(value.replace("%", ""))
-    else:
-        raw = _coerce_number(value)
-    if 0 < raw <= 100:
-        return raw
-    return 0.0
-
-
-def _infer_bdi_percent(
-    quantidade: float,
-    valor_unitario: float,
-    valor_total: float,
-) -> float:
-    if quantidade <= 0 or valor_unitario <= 0 or valor_total <= 0:
-        return 0.0
-    base = quantidade * valor_unitario
-    if valor_total <= base * 1.001:
-        return 0.0
-    inferred = (valor_total / base - 1) * 100
-    if 0 < inferred <= 100:
-        return round(inferred, 2)
-    return 0.0
-
-
-def _sanitize_bdi(
-    bdi: float,
-    quantidade: float,
-    valor_unitario: float,
-    valor_total: float,
-) -> float:
-    if 0 < bdi <= 100:
-        return bdi
-    return _infer_bdi_percent(quantidade, valor_unitario, valor_total)
+    return sanitize_bdi_percent(value)
 
 
 def count_nonempty_rows(rows: list[list[Any]]) -> int:
@@ -109,38 +71,26 @@ def _infer_tipo_linha(
     codigo: str,
     item_numero: str = "",
 ) -> str:
-    desc_norm = descricao.strip().lower()
-    if any(kw in desc_norm for kw in _SUBTOTAL_KEYWORDS):
-        return "grupo"
-    item_stripped = item_numero.strip()
-    is_executive_item_number = bool(
-        item_stripped and re.match(r"^\d+\.\d+\.\d+", item_stripped)
+    return infer_tipo_linha(
+        descricao=descricao,
+        quantidade=quantidade,
+        valor_unitario=valor_unitario,
+        valor_total=valor_total,
+        codigo=codigo,
+        item_numero=item_numero,
     )
-    has_financial = quantidade > 0 or valor_unitario > 0 or valor_total > 0
-    if not has_financial:
-        if item_stripped and re.match(r"^\d+(?:\.\d+)?$", item_stripped):
-            return "grupo"
-        letters = re.sub(r"[^A-Za-zÀ-ÿ]", "", descricao)
-        if letters and descricao == descricao.upper() and len(letters) >= 6:
-            return "grupo"
-        return "grupo"
-    if is_executive_item_number and (valor_total > 0 or (quantidade > 0 and valor_unitario > 0)):
-        return "item"
-    if codigo and quantidade > 0:
-        return "item"
-    if quantidade > 0 and valor_unitario > 0:
-        return "item"
-    if valor_total > 0 and descricao:
-        return "item"
-    return "composicao"
 
 
 def _score_item_confidence(item: dict[str, Any]) -> tuple[float, list[str]]:
     alerts: list[str] = []
     score = 1.0
     quantidade = _coerce_number(item.get("quantidade"))
-    valor_unitario = _coerce_number(item.get("valor_unitario"))
-    valor_total = _coerce_number(item.get("valor_total"))
+    valor_unitario = _coerce_number(
+        item.get("valor_unitario_com_bdi") or item.get("valor_unitario")
+    )
+    valor_total = _coerce_number(
+        item.get("valor_total_com_bdi") or item.get("valor_total")
+    )
     descricao = str(item.get("descricao") or "").strip()
     codigo = str(item.get("codigo") or "").strip()
 
@@ -158,12 +108,13 @@ def _score_item_confidence(item: dict[str, Any]) -> tuple[float, list[str]]:
 
     if quantidade > 0 and valor_unitario > 0 and valor_total > 0:
         esperado = quantidade * valor_unitario
-        if item.get("bdi"):
-            esperado *= 1 + _coerce_bdi(item.get("bdi")) / 100
         erro = abs(valor_total - esperado) / max(abs(valor_total), abs(esperado), 1.0)
-        if erro > 0.05:
+        if erro > 0.02:
             score -= min(0.3, erro)
             alerts.append("Qtd×VU pode divergir do total")
+
+    if item.get("quarentena"):
+        score = min(score, 0.45)
 
     return max(0.0, min(1.0, round(score, 3))), alerts
 
@@ -180,48 +131,35 @@ def _parser_row_to_structured(
     codigo = str(raw.get("codigo") or "").strip()
     item_numero = str(raw.get("item_numero") or raw.get("item") or "").strip()
     banco = str(raw.get("banco") or "").strip()
-    quantidade = _coerce_number(raw.get("quantidade"))
-    valor_unitario = _coerce_number(raw.get("valor_unitario"))
-    valor_total = _coerce_number(raw.get("valor_total"))
-    bdi = _sanitize_bdi(
-        _coerce_bdi(raw.get("bdi")),
-        quantidade,
-        valor_unitario,
-        valor_total,
+
+    row = enrich_item_pricing_and_type(
+        {
+            "item": item_numero or str(index),
+            "item_numero": item_numero or str(index),
+            "banco": banco,
+            "codigo": codigo,
+            "descricao": descricao,
+            "unidade": str(raw.get("unidade") or "un").strip() or "un",
+            "quantidade": raw.get("quantidade"),
+            "valor_unitario": raw.get("valor_unitario"),
+            "valor_total": raw.get("valor_total"),
+            "bdi": raw.get("bdi"),
+            "origem_extracao": "parser_local",
+            "_source_table_id": table_id,
+            "_source_page": page,
+        }
     )
-
-    if valor_total <= 0 and quantidade > 0 and valor_unitario > 0:
-        factor = 1 + bdi / 100 if bdi > 0 else 1
-        valor_total = quantidade * valor_unitario * factor
-
-    tipo_linha = _infer_tipo_linha(
-        descricao, quantidade, valor_unitario, valor_total, codigo, item_numero
-    )
-
-    row: dict[str, Any] = {
-        "item": item_numero or str(index),
-        "item_numero": item_numero or str(index),
-        "tipo": tipo_linha,
-        "tipo_linha": tipo_linha,
-        "banco": banco,
-        "codigo": codigo,
-        "descricao": descricao,
-        "bdi": bdi,
-        "unidade": str(raw.get("unidade") or "un").strip() or "un",
-        "quantidade": quantidade,
-        "valor_unitario": valor_unitario,
-        "valor_total": valor_total,
-        "origem_extracao": "parser_local",
-        "_source_table_id": table_id,
-        "_source_page": page,
-    }
 
     confianca, alertas = _score_item_confidence(row)
-    row["confianca"] = confianca
-    row["alertas"] = alertas
-    if template_sem_precos and valor_unitario <= 0 and valor_total <= 0:
-        alertas.append("Preços em branco no edital — informe manualmente")
-        row["alertas"] = alertas
+    existing = list(row.get("alertas") or [])
+    for a in alertas:
+        if a not in existing:
+            existing.append(a)
+    row["alertas"] = existing
+    row["confianca"] = min(float(row.get("confianca") or 1.0), confianca)
+    if template_sem_precos and row["valor_unitario"] <= 0 and row["valor_total"] <= 0:
+        if "Preços em branco no edital — informe manualmente" not in row["alertas"]:
+            row["alertas"].append("Preços em branco no edital — informe manualmente")
 
     return row
 
@@ -317,19 +255,21 @@ def _filter_for_analysis(
 
     filtered: list[dict[str, Any]] = []
     for item in items:
-        tipo = str(item.get("tipo_linha") or item.get("tipo") or "item").lower()
-        item_numero = str(item.get("item_numero") or item.get("item") or "").strip()
-        descricao = str(item.get("descricao") or "").lower()
+        enriched = enrich_item_pricing_and_type(item)
+        tipo = str(enriched.get("tipo_linha") or enriched.get("tipo") or "item").lower()
+        descricao = str(enriched.get("descricao") or "").lower()
         if tipo == "grupo" or "total do grupo" in descricao:
             continue
+        # Composições sem numeração executiva X.Y.Z ficam de fora da ABC
+        item_numero = str(enriched.get("item_numero") or enriched.get("item") or "").strip()
         if tipo == "composicao" and not re.match(r"^\d+\.\d+\.\d+", item_numero):
             continue
-        q = _coerce_number(item.get("quantidade"))
-        vu = _coerce_number(item.get("valor_unitario"))
-        vt = _coerce_number(item.get("valor_total"))
+        q = _coerce_number(enriched.get("quantidade"))
+        vu = _coerce_number(enriched.get("valor_unitario"))
+        vt = _coerce_number(enriched.get("valor_total_com_bdi") or enriched.get("valor_total"))
         if q <= 0 and vu <= 0 and vt <= 0:
             continue
-        filtered.append(item)
+        filtered.append(enriched)
     return filtered
 
 
@@ -579,7 +519,11 @@ async def process_selected_tables(
     filtered = _filter_for_analysis(deduped, analysis_types)
 
     if not filtered and deduped:
-        filtered = [i for i in deduped if str(i.get("tipo_linha", i.get("tipo"))) != "grupo"]
+        filtered = [
+            enrich_item_pricing_and_type(i)
+            for i in deduped
+            if str(i.get("tipo_linha", i.get("tipo"))) != "grupo"
+        ]
 
     if not filtered:
         raise HTTPException(
@@ -590,37 +534,50 @@ async def process_selected_tables(
             ),
         )
 
-    hierarchical_deduped = deduped
+    # Contrato + tipagem + Curva ABC canônica (fonte de verdade)
+    classified = classify_abc_items(filtered)
+    abc_summary = build_abc_summary(classified)
+    hierarchical_deduped = [enrich_item_pricing_and_type(i) for i in deduped]
 
-    valor_total = sum(_coerce_number(i.get("valor_total")) for i in filtered)
+    valor_total = abc_summary["total_value"]
+    quarantine_count = abc_summary["quarantine_count"]
     resumo = {
-        "total_items": len(filtered),
-        "valor_total": round(valor_total, 2),
+        "total_items": abc_summary["total_items"],
+        "valor_total": valor_total,
         "metodo": OPENAI_ORCAMENTO_MODEL,
         "analysis_types": analysis_types,
+        "abc": abc_summary,
+        "quarantine_count": quarantine_count,
     }
+
+    eligible = [i for i in classified if i.get("abc_elegivel")]
+    message = (
+        f"{len(eligible)} item(ns) elegíveis à Curva ABC "
+        f"({OPENAI_ORCAMENTO_MODEL})"
+    )
+    if quarantine_count:
+        message += f" — {quarantine_count} em quarentena (revisar)"
 
     return {
         "status": "success",
         "upload_id": upload_id,
         "filename": filename,
         "tables_found": len(tables_out),
-        "items_found": len(filtered),
+        "items_found": len(classified),
         "analysis_types": analysis_types,
         "engine": "openai_hybrid",
         "tables": tables_out,
-        "items": filtered,
+        "items": classified,
         "structured_items": hierarchical_deduped,
         "hierarchical_items": hierarchical_deduped,
         "resumo": resumo,
+        "abc_summary": abc_summary,
         "ia_metadata": {
             "tables_processed": len(ia_metadata_list),
             "details": ia_metadata_list,
             "model": OPENAI_ORCAMENTO_MODEL,
             "engine_used": "openai_hybrid",
+            "abc_algorithm": "pareto_before_item_80_95",
         },
-        "message": (
-            f"{len(filtered)} item(ns) extraídos com IA ({OPENAI_ORCAMENTO_MODEL}) "
-            f"— {', '.join(analysis_types)}."
-        ),
+        "message": f"{message} — {', '.join(analysis_types)}.",
     }

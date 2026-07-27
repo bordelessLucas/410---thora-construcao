@@ -146,8 +146,8 @@ const AlertasInteligentes: React.FC<AlertasInteligentesProps> = ({
   };
 
   return (
-    <div className="flex h-full min-h-[320px] flex-col rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-      <h2 className="mb-4 text-lg font-semibold text-slate-900">Alertas</h2>
+    <div className="surface-panel flex h-full min-h-[320px] flex-col p-5 sm:p-6">
+      <h2 className="mb-4 font-display text-lg font-semibold text-slate-900">Alertas</h2>
 
       {loading ? (
         <div className="flex flex-col gap-3">
@@ -188,7 +188,7 @@ const AlertasInteligentes: React.FC<AlertasInteligentesProps> = ({
                       <button
                         type="button"
                         onClick={() => navigate(alert.actionPath!)}
-                        className="mt-2 text-xs font-medium text-blue-600 hover:underline"
+                        className="mt-2 text-xs font-medium text-thora-steel hover:underline"
                       >
                         {alert.actionLabel}
                       </button>

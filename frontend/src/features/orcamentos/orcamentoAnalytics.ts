@@ -35,8 +35,16 @@ export function formatCurrencyK(
 ): string {
   const raw = Array.isArray(value) ? value[0] : value;
   const num = typeof raw === "number" ? raw : raw ? Number(raw) : 0;
-  if (Number.isNaN(num)) return "R$ 0k";
-  return `R$ ${(num / 1000).toFixed(0)}k`;
+  if (Number.isNaN(num)) return "R$ 0";
+  if (Math.abs(num) < 1000) return formatCurrency(num);
+  if (Math.abs(num) < 1_000_000) {
+    return `R$ ${(num / 1000).toLocaleString("pt-BR", {
+      maximumFractionDigits: 1,
+    })} mil`;
+  }
+  return `R$ ${(num / 1_000_000).toLocaleString("pt-BR", {
+    maximumFractionDigits: 2,
+  })} mi`;
 }
 
 export type MonthlyBudgetPoint = {
@@ -92,11 +100,13 @@ export function buildAbcDistribution(orcamentos: Orcamento[]): AbcSlice[] {
   totalValue = counts.A + counts.B + counts.C;
   if (totalValue <= 0) return [];
 
-  return (["A", "B", "C"] as const).map((name) => ({
-    name: `Classe ${name}`,
-    value: counts[name],
-    percentage: Math.round((counts[name] / totalValue) * 100),
-  }));
+  return (["A", "B", "C"] as const)
+    .map((name) => ({
+      name,
+      value: counts[name],
+      percentage: Math.round((counts[name] / totalValue) * 100),
+    }))
+    .filter((slice) => slice.value > 0);
 }
 
 export type TopQuantityItem = { name: string; value: number };

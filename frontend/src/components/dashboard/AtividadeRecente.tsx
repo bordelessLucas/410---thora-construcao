@@ -15,6 +15,7 @@ import {
   formatRelativeTime,
   getOrcamentoCreatedAt,
   getOrcamentoDisplayName,
+  truncateLabel,
 } from "./dashboardUtils";
 
 type ActivityType = "upload" | "export" | "revision" | "processing" | "completion";
@@ -48,7 +49,7 @@ function buildFallbackEvents(orcamentos: Orcamento[]): ActivityEvent[] {
   const events: ActivityEvent[] = [];
 
   for (const o of orcamentos) {
-    const name = getOrcamentoDisplayName(o);
+    const name = getOrcamentoDisplayName(o, 36);
     const uploadedAt = getOrcamentoCreatedAt(o);
     const updatedAt = o.updatedAt ?? o.extractedAt;
 
@@ -57,7 +58,7 @@ function buildFallbackEvents(orcamentos: Orcamento[]): ActivityEvent[] {
       type: "upload",
       uploadId: o.uploadId,
       orcamentoName: name,
-      label: `Orçamento "${name}" enviado`,
+      label: "Orçamento enviado",
       date: uploadedAt,
     });
 
@@ -67,7 +68,7 @@ function buildFallbackEvents(orcamentos: Orcamento[]): ActivityEvent[] {
         type: "processing",
         uploadId: o.uploadId,
         orcamentoName: name,
-        label: `Processamento iniciado em "${name}"`,
+        label: "Processamento iniciado",
         date: o.extractedAt,
       });
     }
@@ -79,7 +80,7 @@ function buildFallbackEvents(orcamentos: Orcamento[]): ActivityEvent[] {
         type: "completion",
         uploadId: o.uploadId,
         orcamentoName: name,
-        label: `Orçamento "${name}" concluído`,
+        label: "Orçamento concluído",
         date: completionDate,
       });
     }
@@ -94,7 +95,7 @@ function buildFallbackEvents(orcamentos: Orcamento[]): ActivityEvent[] {
         type: "revision",
         uploadId: o.uploadId,
         orcamentoName: name,
-        label: `Itens revisados em "${name}"`,
+        label: "Itens revisados",
         date: updatedAt,
       });
     }
@@ -111,14 +112,16 @@ function mapAuditToEvents(
 ): ActivityEvent[] {
   return logs.map((log) => {
     const orc = orcamentos.find((o) => o.uploadId === log.projectId);
-    const name = orc ? getOrcamentoDisplayName(orc) : log.projectId;
+    const name = orc
+      ? getOrcamentoDisplayName(orc, 36)
+      : truncateLabel(String(log.projectId), 36);
     const campo = log.campoAlterado.replace(/_/g, " ");
     return {
       id: `audit-${log.id}`,
       type: "revision" as const,
       uploadId: log.projectId,
       orcamentoName: name,
-      label: `Item ${log.itemCodigo}: ${campo} alterado em "${name}"`,
+      label: `Item ${log.itemCodigo}: ${campo}`,
       date: log.timestamp,
     };
   });
@@ -171,8 +174,10 @@ const AtividadeRecente: React.FC<AtividadeRecenteProps> = ({
   const displayEvents = events.length > 0 ? events.slice(0, 8) : fallbackEvents;
 
   return (
-    <div className="flex h-full min-h-[320px] flex-col rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-      <h2 className="mb-4 text-lg font-semibold text-slate-900">Atividade recente</h2>
+    <div className="surface-panel flex h-full min-h-[320px] flex-col p-5 sm:p-6">
+      <h2 className="mb-4 font-display text-lg font-semibold text-slate-900">
+        Atividade recente
+      </h2>
 
       {loading ? (
         <div className="flex flex-col gap-4">
@@ -210,15 +215,21 @@ const AtividadeRecente: React.FC<AtividadeRecenteProps> = ({
                 >
                   <Icon className="h-4 w-4" />
                 </div>
-                <div className="min-w-0 flex-1 pt-1">
+                <div className="min-w-0 flex-1 pt-0.5 pr-1">
                   <button
                     type="button"
                     onClick={() => navigate(`/validacao/${event.uploadId}`)}
-                    className="text-left text-sm font-medium text-slate-800 hover:text-blue-600"
+                    className="block w-full text-left"
+                    title={event.orcamentoName}
                   >
-                    {event.label}
+                    <span className="block text-sm font-semibold text-slate-800 hover:text-thora-steel">
+                      {event.label}
+                    </span>
+                    <span className="mt-0.5 block truncate text-xs text-slate-500">
+                      {event.orcamentoName}
+                    </span>
                   </button>
-                  <p className="mt-0.5 text-xs text-slate-500">
+                  <p className="mt-1 text-xs text-slate-400">
                     {formatRelativeTime(event.date)}
                   </p>
                 </div>

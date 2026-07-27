@@ -58,37 +58,10 @@ class BudgetParser:
         return keyword in text
     
     def parse_number(self, value: Any) -> float:
-        """Converte string em número, tratando formatos brasileiros"""
-        if value is None or value == "":
-            return 0.0
-        
-        if isinstance(value, (int, float)):
-            return float(value)
-        
-        # String
-        s = str(value).strip()
-        
-        # Remover símbolos de moeda
-        s = s.replace('R$', '').replace('$', '').strip()
-        
-        # Remover espaços
-        s = s.replace(' ', '')
-        
-        # Se tem vírgula e ponto, assume formato brasileiro (1.234,56)
-        if '.' in s and ',' in s:
-            # Remover pontos (separador de milhar)
-            s = s.replace('.', '')
-            # Converter vírgula em ponto
-            s = s.replace(',', '.')
-        # Se tem apenas vírgula, assume decimal
-        elif ',' in s and '.' not in s:
-            s = s.replace(',', '.')
-        
-        try:
-            return float(s)
-        except (ValueError, AttributeError):
-            return 0.0
-    
+        """Converte string em número (formato BRL canônico)."""
+        from app.domain.money import parse_brl
+
+        return parse_brl(value)    
     def is_header_row(self, row: List[Any]) -> bool:
         """Verifica se a linha é um cabeçalho"""
         if not row:

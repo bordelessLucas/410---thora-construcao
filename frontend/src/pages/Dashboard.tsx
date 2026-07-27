@@ -9,6 +9,7 @@ import {
   formatCurrency,
   getOrcamentoTotal,
 } from "../features/orcamentos/orcamentoAnalytics";
+import { getOrcamentoDisplayName } from "../components/dashboard/dashboardUtils";
 import OrcamentoAnalyticsCharts from "../components/OrcamentoAnalyticsCharts";
 import TendenciaTemporalChart from "../components/dashboard/TendenciaTemporalChart";
 import AlertasInteligentes from "../components/dashboard/AlertasInteligentes";
@@ -27,10 +28,10 @@ interface ResumoCardProps {
 }
 
 const variantStyles = {
-  blue: "bg-blue-50 text-blue-600 border-blue-100",
-  gray: "bg-slate-50 text-slate-800 border-slate-200",
-  yellow: "bg-amber-50 text-amber-700 border-amber-100",
-  green: "bg-emerald-50 text-emerald-700 border-emerald-100",
+  blue: "border-thora-steel/15 bg-white/90 text-thora-steel",
+  gray: "border-slate-200/80 bg-white/90 text-slate-800",
+  yellow: "border-amber-200/80 bg-white/90 text-amber-700",
+  green: "border-teal-200/70 bg-white/90 text-thora-accent",
 };
 
 const ResumoCard: React.FC<ResumoCardProps> = ({
@@ -49,17 +50,17 @@ const ResumoCard: React.FC<ResumoCardProps> = ({
 
   return (
     <div
-      className={`flex min-w-0 flex-col gap-2 rounded-2xl border p-6 ${variantStyles[variant]}`}
+      className={`surface-panel flex min-w-0 flex-col gap-2 border p-5 sm:p-6 ${variantStyles[variant]}`}
     >
-      <p className="text-sm text-slate-600">{titulo}</p>
+      <p className="text-sm font-medium text-slate-500">{titulo}</p>
       <p
-        className={`font-bold tabular-nums leading-tight tracking-tight break-words ${valorSize}`}
+        className={`font-display font-bold tabular-nums leading-tight tracking-tight break-words ${valorSize}`}
         title={valor}
       >
         {valor}
       </p>
       <p className="text-sm text-slate-600">{descricao}</p>
-      {extra && <p className="text-sm font-medium text-emerald-600">{extra}</p>}
+      {extra && <p className="text-sm font-medium text-thora-accent">{extra}</p>}
     </div>
   );
 };
@@ -109,14 +110,12 @@ const Dashboard: React.FC = () => {
   }, [orcamentos]);
 
   return (
-    <div className="flex-1 overflow-auto bg-slate-50">
+    <div className="flex-1 overflow-auto">
       <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
         <div className="mb-8 flex flex-col gap-4 sm:mb-10 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
-              Dashboard
-            </h1>
-            <p className="mt-1 text-slate-600">
+            <h1 className="page-title">Dashboard</h1>
+            <p className="page-subtitle">
               Visão geral dos orçamentos analisados e exportados
             </p>
           </div>
@@ -184,25 +183,26 @@ const Dashboard: React.FC = () => {
           </div>
         </div>
 
-        {/* Linha 3: Analytics + Atividade recente */}
-        <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-2">
+        {/* Analytics em largura total — evita esmagar labels/gráficos */}
+        <div className="mb-8">
           <OrcamentoAnalyticsCharts
             orcamentos={orcamentos}
             loading={loading}
             onRefresh={() => void fetchOrcamentos()}
             sectionClassName="mt-0"
           />
+        </div>
+
+        <div className="mb-8 grid grid-cols-1 gap-6 xl:grid-cols-3">
+          <div className="xl:col-span-2">
+            <ComparativoOrcamentos orcamentos={orcamentos} loading={loading} />
+          </div>
           <AtividadeRecente orcamentos={orcamentos} loading={loading} />
         </div>
 
-        {/* Linha 4: Comparativo (colapsável) */}
-        <div className="mb-10">
-          <ComparativoOrcamentos orcamentos={orcamentos} loading={loading} />
-        </div>
-
-        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6 sm:py-5">
-            <h2 className="text-lg font-semibold text-slate-900">
+        <div className="surface-panel overflow-hidden">
+          <div className="flex flex-col gap-3 border-b border-slate-200/80 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6 sm:py-5">
+            <h2 className="font-display text-lg font-semibold text-slate-900">
               Orçamentos recentes
             </h2>
             <button
@@ -215,14 +215,21 @@ const Dashboard: React.FC = () => {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] text-sm">
-              <thead className="bg-slate-50 text-left text-slate-500">
+            <table className="w-full table-fixed text-sm">
+              <colgroup>
+                <col className="w-[38%]" />
+                <col className="w-[16%]" />
+                <col className="w-[18%]" />
+                <col className="w-[10%]" />
+                <col className="w-[18%]" />
+              </colgroup>
+              <thead className="bg-slate-50/90 text-left text-slate-500">
                 <tr>
-                  <th className="px-4 py-3 sm:px-6 sm:py-4">Obra / Projeto</th>
-                  <th className="px-4 py-3 sm:px-6 sm:py-4">Status</th>
-                  <th className="px-4 py-3 text-right sm:px-6 sm:py-4">Valor total</th>
-                  <th className="px-4 py-3 text-right sm:px-6 sm:py-4">Itens</th>
-                  <th className="px-4 py-3 text-right sm:px-6 sm:py-4">Ações</th>
+                  <th className="px-4 py-3 font-medium sm:px-6 sm:py-4">Obra / Projeto</th>
+                  <th className="px-4 py-3 font-medium sm:px-6 sm:py-4">Status</th>
+                  <th className="px-4 py-3 text-right font-medium sm:px-6 sm:py-4">Valor total</th>
+                  <th className="px-4 py-3 text-right font-medium sm:px-6 sm:py-4">Itens</th>
+                  <th className="px-4 py-3 text-right font-medium sm:px-6 sm:py-4">Ações</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
@@ -251,7 +258,7 @@ const Dashboard: React.FC = () => {
                       Nenhum orçamento encontrado. Use{" "}
                       <button
                         type="button"
-                        className="font-medium text-blue-600 underline-offset-2 hover:underline"
+                        className="font-medium text-thora-steel underline-offset-2 hover:underline"
                         onClick={() => navigate("/analise-orcamento")}
                       >
                         Nova análise
@@ -272,9 +279,10 @@ const Dashboard: React.FC = () => {
                       o.status === "completed"
                         ? "bg-emerald-100 text-emerald-800"
                         : o.status === "processing"
-                          ? "bg-blue-100 text-blue-800"
+                          ? "bg-sky-100 text-sky-800"
                           : "bg-red-100 text-red-800";
 
+                    const displayName = getOrcamentoDisplayName(o);
                     const valor =
                       o.status === "completed"
                         ? formatCurrency(getOrcamentoTotal(o))
@@ -283,11 +291,18 @@ const Dashboard: React.FC = () => {
                     return (
                       <tr key={o.id} className="hover:bg-slate-50/80">
                         <td className="px-4 py-4 sm:px-6">
-                          <p className="font-medium text-slate-900">
-                            {o.filename || o.uploadId}
+                          <p
+                            className="truncate font-semibold text-slate-900"
+                            title={o.filename || displayName}
+                          >
+                            {displayName}
                           </p>
-                          <p className="text-xs text-slate-500">
-                            {o.uploadedAt.toLocaleDateString("pt-BR")}
+                          <p className="mt-0.5 text-xs text-slate-500">
+                            {o.uploadedAt.toLocaleDateString("pt-BR", {
+                              day: "2-digit",
+                              month: "short",
+                              year: "numeric",
+                            })}
                           </p>
                         </td>
                         <td className="px-4 py-4 sm:px-6">
@@ -297,30 +312,32 @@ const Dashboard: React.FC = () => {
                             {statusLabel}
                           </span>
                         </td>
-                        <td className="px-4 py-4 text-right font-medium tabular-nums sm:px-6">
+                        <td className="px-4 py-4 text-right font-medium tabular-nums text-slate-900 sm:px-6">
                           {valor}
                         </td>
-                        <td className="px-4 py-4 text-right tabular-nums sm:px-6">
+                        <td className="px-4 py-4 text-right tabular-nums text-slate-700 sm:px-6">
                           {o.itemsFound ?? "—"}
                         </td>
-                        <td className="px-4 py-4 text-right sm:px-6">
-                          {o.status === "completed" && (
-                            <div className="flex justify-end gap-2">
+                        <td className="px-4 py-4 sm:px-6">
+                          {o.status === "completed" ? (
+                            <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
                               <button
                                 type="button"
-                                className="text-xs font-medium text-blue-600 hover:underline"
+                                className="text-xs font-semibold text-thora-steel hover:underline"
                                 onClick={() => navigate(`/validacao/${o.uploadId}`)}
                               >
                                 Validar
                               </button>
                               <button
                                 type="button"
-                                className="text-xs font-medium text-violet-600 hover:underline"
+                                className="text-xs font-semibold text-teal-700 hover:underline"
                                 onClick={() => navigate(`/curva-abc/${o.uploadId}`)}
                               >
                                 Curva ABC
                               </button>
                             </div>
+                          ) : (
+                            <span className="block text-right text-xs text-slate-400">—</span>
                           )}
                         </td>
                       </tr>

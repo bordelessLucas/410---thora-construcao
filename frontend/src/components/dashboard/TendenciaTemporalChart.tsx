@@ -43,11 +43,11 @@ const CustomTooltip: React.FC<{
       <p className="mb-2 text-sm font-semibold text-slate-900">{data.month}</p>
       <p className="text-sm text-slate-600">
         Valor total:{" "}
-        <span className="font-medium text-blue-600">{formatCurrency(data.valor)}</span>
+        <span className="font-medium text-thora-steel">{formatCurrency(data.valor)}</span>
       </p>
       <p className="text-sm text-slate-600">
         Orçamentos:{" "}
-        <span className="font-medium text-emerald-600">{data.quantidade}</span>
+        <span className="font-medium text-thora-accent">{data.quantidade}</span>
       </p>
     </div>
   );
@@ -62,13 +62,15 @@ const TendenciaTemporalChart: React.FC<TendenciaTemporalChartProps> = ({
   const hasEnoughData = monthsWithData >= 2;
 
   return (
-    <div className="flex h-full min-h-[320px] flex-col rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+    <div className="surface-panel flex h-full min-h-[320px] flex-col p-5 sm:p-6">
       <div className="mb-4 flex items-center gap-2">
-        <div className="rounded-lg bg-blue-50 p-2 text-blue-600">
+        <div className="rounded-xl bg-thora-steel/10 p-2 text-thora-steel">
           <TrendingUp className="h-5 w-5" />
         </div>
         <div>
-          <h2 className="text-lg font-semibold text-slate-900">Tendência temporal</h2>
+          <h2 className="font-display text-lg font-semibold text-slate-900">
+            Tendência temporal
+          </h2>
           <p className="text-sm text-slate-500">Últimos 6 meses</p>
         </div>
       </div>
@@ -92,7 +94,7 @@ const TendenciaTemporalChart: React.FC<TendenciaTemporalChartProps> = ({
             <XAxis dataKey="month" stroke="#94a3b8" tick={{ fontSize: 12 }} />
             <YAxis
               yAxisId="left"
-              stroke="#2E7AD4"
+              stroke="#1a4f6e"
               tick={{ fontSize: 12 }}
               tickFormatter={(v) =>
                 new Intl.NumberFormat("pt-BR", {
@@ -106,7 +108,7 @@ const TendenciaTemporalChart: React.FC<TendenciaTemporalChartProps> = ({
             <YAxis
               yAxisId="right"
               orientation="right"
-              stroke="#10b981"
+              stroke="#0f766e"
               tick={{ fontSize: 12 }}
               allowDecimals={false}
             />
@@ -117,9 +119,9 @@ const TendenciaTemporalChart: React.FC<TendenciaTemporalChartProps> = ({
               type="monotone"
               dataKey="valor"
               name="Valor total (R$)"
-              stroke="#2E7AD4"
+              stroke="#1a4f6e"
               strokeWidth={2}
-              dot={{ r: 4, fill: "#2E7AD4" }}
+              dot={{ r: 4, fill: "#1a4f6e" }}
               activeDot={{ r: 6 }}
             />
             <Line
@@ -127,9 +129,9 @@ const TendenciaTemporalChart: React.FC<TendenciaTemporalChartProps> = ({
               type="monotone"
               dataKey="quantidade"
               name="Qtd. processados"
-              stroke="#10b981"
+              stroke="#0f766e"
               strokeWidth={2}
-              dot={{ r: 4, fill: "#10b981" }}
+              dot={{ r: 4, fill: "#0f766e" }}
               activeDot={{ r: 6 }}
             />
           </LineChart>

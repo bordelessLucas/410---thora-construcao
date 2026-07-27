@@ -24,5 +24,6 @@ class ProcessTablesResponse(BaseModel):
     structured_items: list[dict[str, Any]] = Field(default_factory=list)
     hierarchical_items: list[dict[str, Any]] = Field(default_factory=list)
     resumo: dict[str, Any] = Field(default_factory=dict)
+    abc_summary: dict[str, Any] = Field(default_factory=dict)
     ia_metadata: dict[str, Any] = Field(default_factory=dict)
     message: str = ""

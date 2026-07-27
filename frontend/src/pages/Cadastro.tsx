@@ -71,17 +71,22 @@ export default function Cadastro() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center px-6 py-12">
+    <div className="auth-canvas flex min-h-screen items-center justify-center px-6 py-12">
       <div className="w-full max-w-md">
-        <div className="mb-8 flex items-center justify-center">
-          <div className="w-10 h-10 bg-blue-500 rounded-xl flex items-center justify-center font-bold text-white">
+        <div className="mb-10 text-center">
+          <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-linear-to-br from-thora-sky to-thora-steel font-display text-2xl font-bold text-white shadow-lg shadow-thora-sky/30">
             T
           </div>
-          <span className="ml-3 text-xl font-bold text-slate-900">Thora</span>
+          <h1 className="font-display text-4xl font-bold tracking-tight text-white">
+            Thora
+          </h1>
+          <p className="mt-2 text-sm text-slate-300">
+            Comece a analisar orçamentos com mais clareza
+          </p>
         </div>
 
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8">
-          <h1 className="text-2xl font-semibold text-slate-900">Criar conta</h1>
+        <div className="rounded-2xl border border-white/10 bg-white/95 p-8 shadow-2xl shadow-black/30 backdrop-blur-md">
+          <h2 className="font-display text-2xl font-bold text-slate-900">Criar conta</h2>
           <p className="mt-1 text-sm text-slate-600">
             Cadastre-se para salvar e acompanhar seus orçamentos.
           </p>
@@ -103,7 +108,7 @@ export default function Cadastro() {
                 onChange={(e) => setDisplayName(e.target.value)}
                 placeholder="Seu nome"
                 autoComplete="name"
-                className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-900 placeholder:text-slate-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="input-field"
               />
             </div>
 
@@ -117,7 +122,7 @@ export default function Cadastro() {
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="seuemail@empresa.com"
                 autoComplete="email"
-                className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-900 placeholder:text-slate-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="input-field"
               />
             </div>
 
@@ -131,7 +136,7 @@ export default function Cadastro() {
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Mínimo 6 caracteres"
                 autoComplete="new-password"
-                className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-900 placeholder:text-slate-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="input-field"
               />
             </div>
 
@@ -145,14 +150,14 @@ export default function Cadastro() {
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="Repita a senha"
                 autoComplete="new-password"
-                className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-900 placeholder:text-slate-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="input-field"
               />
             </div>
 
             <button
               type="submit"
               disabled={isSubmitting}
-              className="w-full rounded-xl bg-slate-900 px-6 py-3 text-white font-medium hover:bg-slate-800 transition disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+              className="w-full rounded-xl bg-thora-ink px-6 py-3 font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {isSubmitting ? "Criando…" : "Criar conta"}
             </button>
@@ -162,7 +167,7 @@ export default function Cadastro() {
             Já tem conta?{" "}
             <Link
               to="/login"
-              className="font-medium text-blue-600 hover:text-blue-700"
+              className="font-semibold text-thora-steel hover:text-thora-sky"
             >
               Entrar
             </Link>
@@ -172,4 +177,3 @@ export default function Cadastro() {
     </div>
   );
 }
-

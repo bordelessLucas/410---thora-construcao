@@ -9,6 +9,11 @@ from typing import Any, Dict, List, Tuple
 
 from budget_parser import BudgetParser
 
+try:
+    from app.domain.money import parse_brl
+except ImportError:  # pragma: no cover
+    parse_brl = None  # type: ignore
+
 _SERVICE_CODE_PATTERN = re.compile(
     r"\b(CPU\d+|[A-Z]{2,}\d{3,}|\d{5,}[A-Z]?)\b",
     re.IGNORECASE,
@@ -18,6 +23,8 @@ _NUMERIC_FIELDS = ("quantidade", "valor_unitario", "valor_total", "bdi")
 
 
 def _coerce_number(value: Any) -> float:
+    if parse_brl is not None:
+        return parse_brl(value)
     if value is None or value == "":
         return 0.0
     if isinstance(value, (int, float)):

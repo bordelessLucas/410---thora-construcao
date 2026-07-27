@@ -43,39 +43,55 @@ const SidebarLayout: React.FC<SidebarLayoutProps> = ({ children }) => {
       {mobileNavOpen && (
         <button
           type="button"
-          className="fixed inset-0 z-40 bg-slate-900/45 backdrop-blur-[1px] lg:hidden"
+          className="fixed inset-0 z-40 bg-thora-ink/50 backdrop-blur-[2px] lg:hidden"
           aria-label="Fechar menu"
           onClick={() => setMobileNavOpen(false)}
         />
       )}
 
       <aside
-        className={`fixed inset-y-0 left-0 z-50 flex flex-col border-r border-slate-800/80 bg-linear-to-b from-slate-900 to-slate-800 text-white shadow-lg transition-transform duration-300 lg:static lg:translate-x-0 ${asideWidth} ${
+        className={`fixed inset-y-0 left-0 z-50 flex flex-col border-r border-white/5 bg-linear-to-b from-thora-ink via-[#102032] to-[#0d1a27] text-white shadow-xl transition-transform duration-300 lg:static lg:translate-x-0 ${asideWidth} ${
           mobileNavOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         }`}
       >
         <div
-          className={`flex items-center justify-between border-b border-slate-700 px-6 py-6 ${
+          className={`flex items-center justify-between border-b border-white/10 px-5 py-5 ${
             !sidebarOpen && "px-2"
           }`}
         >
           {sidebarOpen && (
             <Link
               to="/"
-              className="flex items-center gap-2"
+              className="group flex min-w-0 items-center gap-3"
               onClick={() => setMobileNavOpen(false)}
             >
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-500 font-bold">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-linear-to-br from-thora-sky to-thora-steel font-display text-lg font-bold shadow-md shadow-thora-steel/30">
                 T
               </div>
-              <span className="text-lg font-bold">Thora</span>
+              <div className="min-w-0">
+                <span className="block font-display text-xl font-bold leading-none tracking-tight">
+                  Thora
+                </span>
+                <span className="mt-1 block truncate text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
+                  Orçamentos
+                </span>
+              </div>
+            </Link>
+          )}
+          {!sidebarOpen && (
+            <Link
+              to="/"
+              className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-linear-to-br from-thora-sky to-thora-steel font-display text-lg font-bold"
+              aria-label="Thora"
+            >
+              T
             </Link>
           )}
           <div className="flex items-center gap-1">
             <button
               type="button"
               onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="hidden rounded-lg p-2 transition hover:bg-slate-700 lg:inline-flex"
+              className="hidden rounded-lg p-2 text-slate-300 transition hover:bg-white/10 hover:text-white lg:inline-flex"
               aria-label={
                 sidebarOpen ? "Recolher menu lateral" : "Expandir menu lateral"
               }
@@ -88,7 +104,7 @@ const SidebarLayout: React.FC<SidebarLayoutProps> = ({ children }) => {
             </button>
             <button
               type="button"
-              className="rounded-lg p-2 transition hover:bg-slate-700 lg:hidden"
+              className="rounded-lg p-2 text-slate-300 transition hover:bg-white/10 hover:text-white lg:hidden"
               aria-label="Fechar menu"
               onClick={() => setMobileNavOpen(false)}
             >
@@ -97,7 +113,7 @@ const SidebarLayout: React.FC<SidebarLayoutProps> = ({ children }) => {
           </div>
         </div>
 
-        <nav className="flex-1 space-y-2 overflow-y-auto px-3 py-6">
+        <nav className="flex-1 space-y-1.5 overflow-y-auto px-3 py-5">
           {menuItems.map((item) => {
             const Icon = item.icon;
             const active = isActive(item.path);
@@ -106,10 +122,10 @@ const SidebarLayout: React.FC<SidebarLayoutProps> = ({ children }) => {
                 key={item.path}
                 to={item.path}
                 onClick={() => setMobileNavOpen(false)}
-                className={`flex items-center gap-3 rounded-lg px-4 py-3 transition ${
+                className={`flex items-center gap-3 rounded-xl px-3.5 py-3 transition ${
                   active
-                    ? "bg-blue-600 font-medium text-white"
-                    : "text-slate-300 hover:bg-slate-700 hover:text-white"
+                    ? "bg-thora-steel font-semibold text-white shadow-sm shadow-thora-steel/40"
+                    : "text-slate-300 hover:bg-white/8 hover:text-white"
                 }`}
                 title={!sidebarOpen ? item.label : undefined}
               >
@@ -120,14 +136,14 @@ const SidebarLayout: React.FC<SidebarLayoutProps> = ({ children }) => {
           })}
         </nav>
 
-        <div className="border-t border-slate-700 px-3 py-4">
+        <div className="border-t border-white/10 px-3 py-4">
           <button
             type="button"
             onClick={async () => {
               await signOutCurrentUser();
               navigate("/login", { replace: true });
             }}
-            className={`flex w-full items-center gap-3 rounded-lg px-4 py-3 text-slate-300 transition hover:bg-slate-700 hover:text-white ${
+            className={`flex w-full items-center gap-3 rounded-xl px-3.5 py-3 text-slate-300 transition hover:bg-white/8 hover:text-white ${
               !sidebarOpen && "justify-center"
             }`}
             title={!sidebarOpen ? "Sair" : undefined}
@@ -139,7 +155,7 @@ const SidebarLayout: React.FC<SidebarLayoutProps> = ({ children }) => {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-4 shadow-sm lg:hidden">
+        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-slate-200/80 bg-white/90 px-4 backdrop-blur-md lg:hidden">
           <button
             type="button"
             onClick={() => setMobileNavOpen(true)}
@@ -148,10 +164,12 @@ const SidebarLayout: React.FC<SidebarLayoutProps> = ({ children }) => {
           >
             <Menu className="h-5 w-5" />
           </button>
-          <span className="font-semibold text-slate-900">Thora</span>
+          <span className="font-display text-lg font-bold text-slate-900">
+            Thora
+          </span>
         </header>
 
-        <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-y-contain">
+        <main className="app-canvas min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-y-contain">
           {children}
         </main>
       </div>

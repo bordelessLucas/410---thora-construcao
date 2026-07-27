@@ -1,6 +1,9 @@
 /**
  * Recalcula totais com BDI e classificação ABC (Curva de Pareto) para itens de orçamento.
+ * Espelha backend/app/domain/abc_curve.py — algoritmo Pareto 80/95 pelo acumulado *antes* do item.
  */
+
+import { parseBrl, relativeError } from "./parseBrl";
 
 export interface OrcamentoItem {
   id: number;
@@ -17,8 +20,12 @@ export interface OrcamentoItem {
   qty: number;
   /** Valor unitário sem BDI (base para o recálculo). */
   unitPrice: number;
-  /** Preço total com BDI: qty × unitPrice × (1 + bdi/100). */
+  /** Preço total com BDI: qty × unitPrice × (1 + bdi/100) ou VT do edital. */
   lineTotal: number;
+  valorUnitarioSemBdi?: number;
+  valorUnitarioComBdi?: number;
+  valorTotalSemBdi?: number;
+  valorTotalComBdi?: number;
   /** Referência do edital antes de ajustes manuais (s/ BDI). */
   referenceUnitPrice?: number;
   /** Total c/ BDI da referência do edital. */
@@ -31,10 +38,28 @@ export interface OrcamentoItem {
   extractionConfidence?: number;
   /** Alertas de validação automática (ex.: Qtd×VU≠Total). */
   extractionAlerts?: string[];
+  /** Linha com divergência alta — fora da ABC até revisão. */
+  quarantine?: boolean;
+  abcEligible?: boolean;
 }
 
-export function resolveTipoLinha(item: { tipo?: string; tipo_linha?: string }): "grupo" | "item" | "composicao" {
+export function resolveTipoLinha(item: {
+  tipo?: string;
+  tipo_linha?: string;
+  item?: string;
+  item_numero?: string;
+  quantidade?: number;
+  valor_total?: number;
+  codigo?: string;
+}): "grupo" | "item" | "composicao" {
   const tipo = String(item.tipo_linha ?? item.tipo ?? "item").toLowerCase();
+  const itemNumero = String(item.item_numero ?? item.item ?? "").trim();
+  const isXyz = /^\d+\.\d+\.\d+/.test(itemNumero);
+
+  // NOVACAP: X.Y.Z com financeiro nunca é composição
+  if (isXyz && tipo === "composicao") {
+    return "item";
+  }
   if (tipo === "grupo" || tipo === "titulo" || tipo === "título" || tipo === "title") {
     return "grupo";
   }
@@ -47,25 +72,14 @@ export function resolveTipoLinha(item: { tipo?: string; tipo_linha?: string }): 
 export function isExecutiveItem(item: OrcamentoItem): boolean {
   const tipo = resolveTipoLinha(item);
   const desc = item.description.toLowerCase();
-  return tipo === "item" && !desc.includes("total do grupo");
+  if (tipo !== "item" || desc.includes("total do grupo")) return false;
+  if (item.quarantine === true || item.abcEligible === false) return false;
+  return (item.lineTotal ?? 0) > 0 || (item.valorTotalComBdi ?? 0) > 0;
 }
 
-/** Converte valor vindo de input (pt-BR ou en-US) para float. */
+/** @deprecated Prefer parseBrl — mantido como alias. */
 export function parseEditableNumber(value: unknown): number {
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : 0;
-  }
-  if (typeof value !== "string") return 0;
-  const compact = value.replace(/R\$/gi, "").replace(/%/g, "").replace(/\s/g, "").trim();
-  if (!compact) return 0;
-  const normalized =
-    compact.includes(",") && compact.includes(".")
-      ? compact.replace(/\./g, "").replace(",", ".")
-      : compact.includes(",")
-        ? compact.replace(",", ".")
-        : compact;
-  const parsed = Number.parseFloat(normalized);
-  return Number.isFinite(parsed) ? parsed : 0;
+  return parseBrl(value);
 }
 
 export function calcularLineTotalComBdi(
@@ -109,8 +123,7 @@ export function inferBdiPercent(
   return inferred > 0 && inferred <= 100 ? Math.round(inferred * 100) / 100 : 0;
 }
 
-/** Resolve qty, BDI e unitPrice (s/ BDI) a partir de item estruturado do backend. */
-export function resolveStructuredItemPricing(item: {
+type StructuredPricingInput = {
   quantidade?: unknown;
   Quantidade?: unknown;
   qty?: unknown;
@@ -118,55 +131,161 @@ export function resolveStructuredItemPricing(item: {
   "Valor Unitário"?: unknown;
   unitPrice?: unknown;
   unitValue?: unknown;
+  valor_unitario_sem_bdi?: unknown;
+  valor_unitario_com_bdi?: unknown;
+  unit_com_bdi?: unknown;
   valor_total?: unknown;
   Total?: unknown;
   totalValue?: unknown;
+  valor_total_sem_bdi?: unknown;
+  valor_total_com_bdi?: unknown;
+  total_com_bdi?: unknown;
   bdi?: unknown;
   BDI?: unknown;
-}): { qty: number; bdi: number; unitPrice: number } {
-  const qty = parseEditableNumber(item.quantidade ?? item.Quantidade ?? item.qty);
-  const valorTotalComBdi = parseEditableNumber(
-    item.valor_total ?? item.Total ?? item.totalValue,
-  );
+  quarentena?: unknown;
+  abc_elegivel?: unknown;
+  alertas?: unknown;
+  confianca?: unknown;
+};
+
+export type ResolvedStructuredPricing = {
+  qty: number;
+  bdi: number;
+  unitPrice: number;
+  unitPriceComBdi: number;
+  valorTotalSemBdi: number;
+  valorTotalComBdi: number;
+  quarantine: boolean;
+  alerts: string[];
+  confidence: number;
+};
+
+/**
+ * Resolve pricing canônico a partir do item estruturado do backend.
+ * Preferência: valor_total_com_bdi do PDF como fonte da ABC.
+ */
+export function resolveStructuredItemPricing(
+  item: StructuredPricingInput,
+): ResolvedStructuredPricing {
+  const qty = parseBrl(item.quantidade ?? item.Quantidade ?? item.qty);
+  const alerts: string[] = Array.isArray(item.alertas)
+    ? [...(item.alertas as string[])]
+    : [];
 
   let bdi = sanitizeBdiPercent(
-    parseEditableNumber(String(item.bdi ?? item.BDI ?? 0).replace("%", "")),
+    parseBrl(String(item.bdi ?? item.BDI ?? 0).replace("%", "")),
   );
 
-  let unitPriceSemBdi = parseEditableNumber(
+  let vuSem = parseBrl(item.valor_unitario_sem_bdi);
+  let vuCom = parseBrl(item.valor_unitario_com_bdi ?? item.unit_com_bdi);
+  let vtSem = parseBrl(item.valor_total_sem_bdi);
+  let vtCom = parseBrl(
+    item.valor_total_com_bdi ?? item.total_com_bdi ?? item.valor_total ?? item.Total ?? item.totalValue,
+  );
+  const vuRaw = parseBrl(
     item.valor_unitario ?? item["Valor Unitário"] ?? item.unitValue ?? item.unitPrice,
   );
 
-  if (bdi <= 0) {
-    bdi = inferBdiPercent(qty, unitPriceSemBdi, valorTotalComBdi);
+  const tolerance = 0.02;
+
+  if (vuSem <= 0 && vuCom <= 0 && vuRaw > 0) {
+    if (qty > 0 && vtCom > 0) {
+      const errAsCom = relativeError(qty * vuRaw, vtCom);
+      const errAsSem =
+        bdi > 0
+          ? relativeError(qty * vuRaw * (1 + bdi / 100), vtCom)
+          : Number.POSITIVE_INFINITY;
+      const inferred = bdi <= 0 ? inferBdiPercent(qty, vuRaw, vtCom) : 0;
+      const errAsSemInf =
+        inferred > 0
+          ? relativeError(qty * vuRaw * (1 + inferred / 100), vtCom)
+          : Number.POSITIVE_INFINITY;
+
+      if (errAsCom <= tolerance && errAsCom <= errAsSem) {
+        vuCom = vuRaw;
+        alerts.push("VU interpretado como C/BDI (bate com total)");
+      } else if (errAsSem <= tolerance || errAsSemInf <= tolerance) {
+        vuSem = vuRaw;
+        if (bdi <= 0 && inferred > 0) bdi = inferred;
+      } else {
+        vuSem = vuRaw;
+        alerts.push("VU/total inconsistentes — VT do PDF prevalece");
+      }
+    } else {
+      vuSem = vuRaw;
+    }
   }
 
-  if (unitPriceSemBdi <= 0 && valorTotalComBdi > 0 && qty > 0) {
-    unitPriceSemBdi =
-      bdi > 0
-        ? valorTotalComBdi / qty / (1 + bdi / 100)
-        : valorTotalComBdi / qty;
+  if (bdi <= 0 && qty > 0 && vuSem > 0 && vtCom > 0) {
+    bdi = inferBdiPercent(qty, vuSem, vtCom);
   }
 
-  return { qty, bdi, unitPrice: unitPriceSemBdi };
+  const factor = bdi > 0 ? 1 + bdi / 100 : 1;
+  if (vuSem <= 0 && vuCom > 0) vuSem = vuCom / factor;
+  if (vuCom <= 0 && vuSem > 0) vuCom = vuSem * factor;
+  if (vtSem <= 0 && qty > 0 && vuSem > 0) vtSem = qty * vuSem;
+  if (vtCom <= 0 && qty > 0 && vuCom > 0) vtCom = qty * vuCom;
+  else if (vtCom <= 0 && vtSem > 0) vtCom = vtSem * factor;
+  if (vuSem <= 0 && vtSem > 0 && qty > 0) vuSem = vtSem / qty;
+  if (vuCom <= 0 && vtCom > 0 && qty > 0) vuCom = vtCom / qty;
+  if (vtSem <= 0 && vtCom > 0) vtSem = vtCom / factor;
+
+  let quarantine = item.quarentena === true;
+  let confidence =
+    typeof item.confianca === "number" && Number.isFinite(item.confianca)
+      ? Number(item.confianca)
+      : 1;
+
+  if (qty > 0 && vuCom > 0 && vtCom > 0) {
+    const err = relativeError(qty * vuCom, vtCom);
+    if (err > tolerance) {
+      vuCom = vtCom / qty;
+      vuSem = vuCom / factor;
+      vtSem = qty * vuSem;
+      alerts.push(`Qtd×VU≠VT (erro ${(err * 100).toFixed(1)}%) — total do edital usado na ABC`);
+      confidence = Math.min(confidence, Math.max(0.45, 1 - Math.min(err, 0.55)));
+      // VT do edital prevalece: não coloca em quarentena automaticamente
+    }
+  } else if (vtCom <= 0 && qty <= 0 && vuSem <= 0) {
+    quarantine = true;
+    confidence = Math.min(confidence, 0.2);
+    alerts.push("Sem quantidade nem preços");
+  }
+  return {
+    qty,
+    bdi,
+    unitPrice: Math.round(vuSem * 1e6) / 1e6,
+    unitPriceComBdi: Math.round(vuCom * 1e6) / 1e6,
+    valorTotalSemBdi: Math.round(vtSem * 100) / 100,
+    valorTotalComBdi: Math.round(vtCom * 100) / 100,
+    quarantine,
+    alerts: [...new Set(alerts)],
+    confidence,
+  };
 }
 
 /**
  * Recalcula lineTotal, ordena por valor, percentuais e classificação A/B/C.
- * Itens "grupo" permanecem no final sem entrar na Curva ABC.
+ * Itens grupo/quarentena permanecem fora da curva.
  */
 export function recalcularCurvaABC(items: OrcamentoItem[]): OrcamentoItem[] {
-  const groups = items.filter((item) => !isExecutiveItem(item));
-  const executives = items
-    .filter(isExecutiveItem)
-    .map((item) => {
-      const calculated = calcularLineTotalComBdi(item.qty, item.unitPrice, item.bdi);
-      const lineTotal =
-        item.referenceLineTotal && item.referenceLineTotal > 0
-          ? item.referenceLineTotal
+  const withTotals = items.map((item) => {
+    const calculated = calcularLineTotalComBdi(item.qty, item.unitPrice, item.bdi);
+    const lineTotal =
+      item.referenceLineTotal && item.referenceLineTotal > 0
+        ? item.referenceLineTotal
+        : item.valorTotalComBdi && item.valorTotalComBdi > 0
+          ? item.valorTotalComBdi
           : calculated;
-      return { ...item, lineTotal };
-    });
+    return {
+      ...item,
+      lineTotal,
+      valorTotalComBdi: lineTotal,
+    };
+  });
+
+  const groups = withTotals.filter((item) => !isExecutiveItem(item));
+  const executives = withTotals.filter(isExecutiveItem);
 
   const sorted = [...executives].sort((a, b) => {
     const diff = b.lineTotal - a.lineTotal;
@@ -197,10 +316,18 @@ export function recalcularCurvaABC(items: OrcamentoItem[]): OrcamentoItem[] {
       individual_percentage: individualPercentage,
       accumulated_percentage: accumulatedPercentage,
       classification,
+      abcEligible: true,
     };
   });
 
-  return [...classified, ...groups];
+  const others = groups.map((item) => ({
+    ...item,
+    classification: undefined,
+    individual_percentage: 0,
+    accumulated_percentage: 0,
+  }));
+
+  return [...classified, ...others];
 }
 
 export interface AbcResumo {
@@ -208,11 +335,13 @@ export interface AbcResumo {
   classeA: { count: number; valor: number };
   classeB: { count: number; valor: number };
   classeC: { count: number; valor: number };
+  quarantineCount?: number;
 }
 
 export function calcularResumoAbc(items: OrcamentoItem[]): AbcResumo {
   const executives = items.filter(isExecutiveItem);
   const totalGeral = executives.reduce((acc, item) => acc + item.lineTotal, 0);
+  const quarantineCount = items.filter((i) => i.quarantine).length;
 
   const sumByClass = (cls: "A" | "B" | "C") => {
     const filtered = executives.filter((i) => i.classification === cls);
@@ -227,6 +356,7 @@ export function calcularResumoAbc(items: OrcamentoItem[]): AbcResumo {
     classeA: sumByClass("A"),
     classeB: sumByClass("B"),
     classeC: sumByClass("C"),
+    quarantineCount,
   };
 }
 
@@ -235,7 +365,10 @@ export function snapshotReferenciaOrcamento(item: OrcamentoItem): OrcamentoItem 
   if (item.referenceLineTotal != null && item.referenceLineTotal > 0) {
     return item;
   }
-  const refTotal = calcularLineTotalComBdi(item.qty, item.unitPrice, item.bdi);
+  const refTotal =
+    item.valorTotalComBdi && item.valorTotalComBdi > 0
+      ? item.valorTotalComBdi
+      : calcularLineTotalComBdi(item.qty, item.unitPrice, item.bdi);
   return {
     ...item,
     referenceUnitPrice: item.unitPrice,

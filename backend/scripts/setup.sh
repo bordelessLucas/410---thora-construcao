@@ -17,6 +17,7 @@ if [[ ! -x "$ROOT_DIR/venv/bin/python" ]]; then
 fi
 
 echo "[backend] Instalando dependências Python..."
-uv pip install -r requirements.txt
+# uv 0.11+ não detecta automaticamente o diretório `venv` (só `.venv`)
+uv pip install --python "$ROOT_DIR/venv/bin/python" -r requirements.txt
 
 echo "[backend] Setup concluído."

@@ -19,8 +19,44 @@ export function getOrcamentoCreatedAt(o: Orcamento): Date {
   return raw.createdAt ?? raw.dataUpload ?? o.uploadedAt;
 }
 
-export function getOrcamentoDisplayName(o: Orcamento): string {
-  return o.nomeProjeto || o.filename || o.uploadId;
+export function humanizeFileName(raw: string): string {
+  const base = raw
+    .replace(/^.*[/\\]/, "")
+    .replace(/\.[a-z0-9]{2,5}$/i, "")
+    .trim();
+
+  if (!base) return raw.trim() || "Orçamento";
+
+  const cleaned = base
+    .replace(/^\d+[_-]+/, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) return "Orçamento";
+
+  return cleaned
+    .split(" ")
+    .map((word) => {
+      if (word.length <= 2 && word === word.toUpperCase()) return word;
+      if (/^[A-Z0-9]{2,6}$/.test(word)) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(" ");
+}
+
+export function truncateLabel(text: string, max = 42): string {
+  const value = text.trim();
+  if (value.length <= max) return value;
+  const slice = value.slice(0, Math.max(1, max - 1)).trimEnd();
+  return `${slice}…`;
+}
+
+export function getOrcamentoDisplayName(o: Orcamento, maxLength?: number): string {
+  const preferred = (o.nomeProjeto || "").trim();
+  const raw = preferred || o.filename || o.uploadId || "Orçamento";
+  const name = preferred ? preferred : humanizeFileName(raw);
+  return typeof maxLength === "number" ? truncateLabel(name, maxLength) : name;
 }
 
 export function buildTendenciaMensalSeries(orcamentos: Orcamento[]): TendenciaMensalPoint[] {

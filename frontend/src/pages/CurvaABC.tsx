@@ -28,6 +28,7 @@ import { useAuth } from "../features/auth/AuthContext";
 import { getLatestBDIAplicado } from "../features/bdi/bdiAplicadoRepository";
 import type { BDIAplicado } from "../types/bdi";
 import { toast } from "sonner";
+import { parseBrl } from "../features/orcamentos/parseBrl";
 
 interface Item {
   id: string;
@@ -49,6 +50,10 @@ type RawItem = Partial<Item> & {
   unitPrice?: number;
   lineTotal?: number;
   bdi?: number;
+  valor_total_com_bdi?: number;
+  valor_unitario_com_bdi?: number;
+  quarentena?: boolean;
+  abc_elegivel?: boolean;
 };
 
 const CurvaABC: React.FC = () => {
@@ -87,20 +92,36 @@ const CurvaABC: React.FC = () => {
     [items],
   );
 
-  const toNumber = (value: unknown): number => {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : 0;
-  };
+  const toNumber = (value: unknown): number => parseBrl(value);
 
   const normalizeItem = (raw: RawItem, index: number): Item => {
     const quantidade = toNumber(raw.quantidade ?? raw.qty);
-    const valorUnitario = toNumber(raw.valor_unitario ?? raw.unitPrice);
+    const valorUnitario = toNumber(
+      raw.valor_unitario_com_bdi ?? raw.valor_unitario ?? raw.unitPrice,
+    );
     const bdi = toNumber(raw.bdi);
-    const valorTotalExplicit = toNumber(raw.valor_total ?? raw.lineTotal);
+    const valorTotalExplicit = toNumber(
+      raw.valor_total_com_bdi ?? raw.valor_total ?? raw.lineTotal,
+    );
     const valorTotal =
       valorTotalExplicit > 0
         ? valorTotalExplicit
         : quantidade * valorUnitario * (1 + bdi / 100);
+
+    // Quarentena / inelegível: zera para não entrar no Pareto local
+    if (raw.quarentena === true || raw.abc_elegivel === false) {
+      return {
+        id: String(raw.id ?? index + 1),
+        descricao: String(raw.descricao ?? raw.description ?? "").trim(),
+        quantidade,
+        unidade: String(raw.unidade ?? raw.unit ?? "un").trim() || "un",
+        valor_unitario: valorUnitario,
+        valor_total: 0,
+        status: (raw.status as Item["status"]) || "pendente_validacao",
+        classification: undefined,
+        accumulated_percentage: 0,
+      };
+    }
 
     return {
       id: String(raw.id ?? index + 1),
@@ -356,21 +377,24 @@ const CurvaABC: React.FC = () => {
   };
 
   return (
-    <div className="w-full min-h-full bg-slate-100 py-8 pb-16">
-      <div className="max-w-7xl mx-auto px-4">
+    <div className="w-full min-h-full py-8 pb-16">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6">
         {/* Header */}
-        <div className="flex items-center gap-4 mb-8">
+        <div className="mb-8 flex items-center gap-4">
           <button
             type="button"
             onClick={() => navigate(uploadId ? `/validacao/${uploadId}` : "/analise-orcamento")}
-            className="rounded-lg p-2 text-slate-600 transition hover:bg-slate-200"
+            className="rounded-xl p-2 text-slate-600 transition hover:bg-white/80"
             aria-label="Voltar para validação"
           >
             <ArrowLeft size={24} aria-hidden />
           </button>
           <div>
-            <h1 className="text-3xl font-bold">Análise de Curva ABC</h1>
-            <p className="text-slate-600">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-thora-steel">
+              Thora
+            </p>
+            <h1 className="page-title text-3xl sm:text-3xl">Análise de Curva ABC</h1>
+            <p className="page-subtitle">
               Classificação de itens por impacto no orçamento
             </p>
           </div>

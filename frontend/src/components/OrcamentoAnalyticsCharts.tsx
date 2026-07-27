@@ -36,6 +36,8 @@ import {
   formatCurrencyK,
   getOrcamentoTotal,
 } from "../features/orcamentos/orcamentoAnalytics";
+import { getOrcamentoDisplayName } from "./dashboard/dashboardUtils";
+import { btnAccent, btnSecondary } from "./ui/buttonClasses";
 
 interface OrcamentoAnalyticsChartsProps {
   orcamentos: Orcamento[];
@@ -45,6 +47,8 @@ interface OrcamentoAnalyticsChartsProps {
   subtitle?: string;
   sectionClassName?: string;
 }
+
+const ABC_COLORS = ["#1a4f6e", "#2f7aa8", "#0f766e"];
 
 const OrcamentoAnalyticsCharts: React.FC<OrcamentoAnalyticsChartsProps> = ({
   orcamentos,
@@ -69,22 +73,22 @@ const OrcamentoAnalyticsCharts: React.FC<OrcamentoAnalyticsChartsProps> = ({
 
   const kpis = [
     {
-      label: "Orçamento Total",
+      label: "Orçamento total",
       value: loading ? "—" : formatCurrency(totals.totalBudget),
-      icon: <DollarSign className="h-6 w-6" />,
-      color: "bg-blue-500",
+      icon: <DollarSign className="h-5 w-5" />,
+      tone: "bg-thora-steel/10 text-thora-steel",
     },
     {
       label: "Orçamentos analisados",
       value: loading ? "—" : String(completed.length),
-      icon: <TrendingUp className="h-6 w-6" />,
-      color: "bg-green-500",
+      icon: <TrendingUp className="h-5 w-5" />,
+      tone: "bg-emerald-50 text-thora-accent",
     },
     {
       label: "Itens (total)",
       value: loading ? "—" : String(totals.totalItems),
-      icon: <BarChart3 className="h-6 w-6" />,
-      color: "bg-purple-500",
+      icon: <BarChart3 className="h-5 w-5" />,
+      tone: "bg-sky-50 text-thora-sky",
     },
     {
       label: "Média por orçamento",
@@ -92,8 +96,8 @@ const OrcamentoAnalyticsCharts: React.FC<OrcamentoAnalyticsChartsProps> = ({
         loading || completed.length === 0
           ? "—"
           : formatCurrency(totals.totalBudget / completed.length),
-      icon: <PieChart className="h-6 w-6" />,
-      color: "bg-orange-500",
+      icon: <PieChart className="h-5 w-5" />,
+      tone: "bg-amber-50 text-amber-700",
     },
   ];
 
@@ -146,18 +150,20 @@ const OrcamentoAnalyticsCharts: React.FC<OrcamentoAnalyticsChartsProps> = ({
 
   return (
     <section className={sectionClassName}>
-      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h2 className="text-xl font-bold text-slate-900 sm:text-2xl">{title}</h2>
+          <h2 className="font-display text-xl font-bold text-slate-900 sm:text-2xl">
+            {title}
+          </h2>
           <p className="mt-1 text-sm text-slate-600">{subtitle}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-2 text-sm text-slate-600">
-            <Filter className="h-4 w-4" />
+          <div className="flex items-center gap-2 rounded-xl border border-slate-200/90 bg-white/90 px-3 py-2 text-sm text-slate-600 shadow-sm">
+            <Filter className="h-4 w-4 shrink-0" />
             <select
               value={dateRange}
               onChange={(e) => setDateRange(e.target.value)}
-              className="rounded-lg border border-slate-200 px-3 py-1.5 text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="bg-transparent text-slate-700 focus:outline-none"
             >
               <option value="7days">Últimos 7 dias</option>
               <option value="30days">Últimos 30 dias</option>
@@ -170,7 +176,7 @@ const OrcamentoAnalyticsCharts: React.FC<OrcamentoAnalyticsChartsProps> = ({
               type="button"
               onClick={onRefresh}
               disabled={loading}
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 transition hover:bg-slate-50"
+              className={btnSecondary}
             >
               <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
               Atualizar
@@ -180,7 +186,7 @@ const OrcamentoAnalyticsCharts: React.FC<OrcamentoAnalyticsChartsProps> = ({
             type="button"
             onClick={() => void handleExportDashboard()}
             disabled={isExporting || loading || completed.length === 0}
-            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-700 disabled:opacity-50"
+            className={btnAccent}
           >
             <Download className={`h-4 w-4 ${isExporting ? "animate-bounce" : ""}`} />
             {isExporting ? "Exportando…" : "Exportar PDF"}
@@ -189,24 +195,26 @@ const OrcamentoAnalyticsCharts: React.FC<OrcamentoAnalyticsChartsProps> = ({
       </div>
 
       <div ref={dashboardRef}>
-        <div className="mb-8 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-          {kpis.map((kpi, idx) => (
-            <div
-              key={idx}
-              className="kpi-card rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"
-            >
-              <div className={`${kpi.color} mb-4 inline-flex rounded-lg p-3 text-white`}>
+        <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {kpis.map((kpi) => (
+            <div key={kpi.label} className="kpi-card surface-panel p-5">
+              <div className={`mb-3 inline-flex rounded-xl p-2.5 ${kpi.tone}`}>
                 {kpi.icon}
               </div>
-              <p className="text-sm text-slate-600">{kpi.label}</p>
-              <p className="text-2xl font-bold text-slate-900">{kpi.value}</p>
+              <p className="text-sm text-slate-500">{kpi.label}</p>
+              <p
+                className="mt-1 text-xl font-bold tabular-nums tracking-tight text-slate-900 sm:text-2xl"
+                title={kpi.value}
+              >
+                {kpi.value}
+              </p>
             </div>
           ))}
         </div>
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <div className="chart-card rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <h3 className="mb-4 text-lg font-semibold text-slate-900">
+          <div className="chart-card surface-panel p-5 sm:p-6">
+            <h3 className="mb-4 font-display text-lg font-semibold text-slate-900">
               Evolução mensal (valor total)
             </h3>
             {completed.length === 0 ? (
@@ -218,36 +226,48 @@ const OrcamentoAnalyticsCharts: React.FC<OrcamentoAnalyticsChartsProps> = ({
                 <AreaChart data={monthlyData}>
                   <defs>
                     <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#2E7AD4" stopOpacity={0.8} />
-                      <stop offset="95%" stopColor="#2E7AD4" stopOpacity={0} />
+                      <stop offset="5%" stopColor="#2f7aa8" stopOpacity={0.55} />
+                      <stop offset="95%" stopColor="#2f7aa8" stopOpacity={0} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                  <XAxis dataKey="month" stroke="#94a3b8" />
-                  <YAxis stroke="#94a3b8" tickFormatter={(v) => formatCurrencyK(v)} />
-                  <Tooltip formatter={(v) => formatCurrencyK(v)} />
+                  <XAxis dataKey="month" stroke="#94a3b8" tick={{ fontSize: 12 }} />
+                  <YAxis
+                    stroke="#94a3b8"
+                    tick={{ fontSize: 12 }}
+                    tickFormatter={(v) => formatCurrencyK(v)}
+                    width={72}
+                  />
+                  <Tooltip
+                    formatter={(v) => formatCurrency(Number(v))}
+                    contentStyle={{
+                      borderRadius: 12,
+                      border: "1px solid #e2e8f0",
+                    }}
+                  />
                   <Legend />
                   <Area
                     type="monotone"
                     dataKey="value"
-                    stroke="#2E7AD4"
+                    stroke="#1a4f6e"
                     fill="url(#colorValue)"
                     name="Valor exportado"
                   />
                   <Line
                     type="monotone"
                     dataKey="planned"
-                    stroke="#f59e0b"
+                    stroke="#d97706"
                     strokeDasharray="5 5"
                     name="Referência"
+                    dot={false}
                   />
                 </AreaChart>
               </ResponsiveContainer>
             )}
           </div>
 
-          <div className="chart-card rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <h3 className="mb-4 text-lg font-semibold text-slate-900">
+          <div className="chart-card surface-panel p-5 sm:p-6">
+            <h3 className="mb-4 font-display text-lg font-semibold text-slate-900">
               Curva ABC (valor por classe)
             </h3>
             {abcData.length === 0 ? (
@@ -255,35 +275,73 @@ const OrcamentoAnalyticsCharts: React.FC<OrcamentoAnalyticsChartsProps> = ({
                 Valide orçamentos para gerar classificação ABC nos gráficos.
               </p>
             ) : (
-              <ResponsiveContainer width="100%" height={280}>
-                <RechartsPieChart>
-                  <Pie
-                    data={abcData}
-                    cx="50%"
-                    cy="50%"
-                    labelLine={false}
-                    label={({ name, percent }) => {
-                      const pct = percent ? Math.round(percent * 100) : 0;
-                      return `${name ?? ""} ${pct}%`;
-                    }}
-                    outerRadius={90}
-                    dataKey="value"
-                  >
-                    {abcData.map((_, index) => (
-                      <Cell
-                        key={`cell-${index}`}
-                        fill={CHART_COLORS[index % CHART_COLORS.length]}
+              <div className="flex h-[280px] flex-col gap-4 sm:flex-row sm:items-center">
+                <div className="min-h-0 min-w-0 flex-1">
+                  <ResponsiveContainer width="100%" height={220}>
+                    <RechartsPieChart>
+                      <Pie
+                        data={abcData}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={58}
+                        outerRadius={88}
+                        paddingAngle={2}
+                        dataKey="value"
+                        nameKey="name"
+                        stroke="none"
+                      >
+                        {abcData.map((_, index) => (
+                          <Cell
+                            key={`cell-${index}`}
+                            fill={ABC_COLORS[index % ABC_COLORS.length]}
+                          />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        formatter={(v, _n, item) => {
+                          const pct =
+                            (item?.payload as { percentage?: number } | undefined)
+                              ?.percentage ?? 0;
+                          return [`${formatCurrency(Number(v))} (${pct}%)`, "Valor"];
+                        }}
+                        labelFormatter={(label) => `Classe ${label}`}
+                        contentStyle={{
+                          borderRadius: 12,
+                          border: "1px solid #e2e8f0",
+                        }}
                       />
-                    ))}
-                  </Pie>
-                  <Tooltip formatter={(v) => formatCurrencyK(v)} />
-                </RechartsPieChart>
-              </ResponsiveContainer>
+                    </RechartsPieChart>
+                  </ResponsiveContainer>
+                </div>
+                <ul className="flex shrink-0 flex-row flex-wrap justify-center gap-3 sm:w-40 sm:flex-col sm:gap-3">
+                  {abcData.map((slice, index) => (
+                    <li
+                      key={slice.name}
+                      className="flex min-w-[7.5rem] items-center gap-2 rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2"
+                    >
+                      <span
+                        className="h-2.5 w-2.5 shrink-0 rounded-full"
+                        style={{
+                          backgroundColor: ABC_COLORS[index % ABC_COLORS.length],
+                        }}
+                      />
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-slate-900">
+                          Classe {slice.name}
+                        </p>
+                        <p className="text-xs tabular-nums text-slate-500">
+                          {slice.percentage}% · {formatCurrencyK(slice.value)}
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </div>
 
-          <div className="chart-card rounded-2xl border border-slate-200 bg-white p-6 shadow-sm lg:col-span-2">
-            <h3 className="mb-4 text-lg font-semibold text-slate-900">
+          <div className="chart-card surface-panel p-5 sm:p-6 lg:col-span-2">
+            <h3 className="mb-4 font-display text-lg font-semibold text-slate-900">
               Orçamentos por valor total
             </h3>
             {completed.length === 0 ? (
@@ -294,15 +352,31 @@ const OrcamentoAnalyticsCharts: React.FC<OrcamentoAnalyticsChartsProps> = ({
               <ResponsiveContainer width="100%" height={280}>
                 <BarChart
                   data={completed.slice(0, 8).map((o) => ({
-                    name: (o.filename || o.uploadId).slice(0, 18),
+                    name: getOrcamentoDisplayName(o, 18),
                     value: getOrcamentoTotal(o),
                   }))}
                 >
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                  <XAxis dataKey="name" stroke="#94a3b8" />
-                  <YAxis stroke="#94a3b8" tickFormatter={(v) => formatCurrencyK(v)} />
-                  <Tooltip formatter={(v) => formatCurrencyK(v)} />
-                  <Bar dataKey="value" fill="#1F4E78" name="Valor (R$)" radius={[6, 6, 0, 0]} />
+                  <XAxis dataKey="name" stroke="#94a3b8" tick={{ fontSize: 11 }} />
+                  <YAxis
+                    stroke="#94a3b8"
+                    tick={{ fontSize: 12 }}
+                    tickFormatter={(v) => formatCurrencyK(v)}
+                    width={72}
+                  />
+                  <Tooltip
+                    formatter={(v) => formatCurrency(Number(v))}
+                    contentStyle={{
+                      borderRadius: 12,
+                      border: "1px solid #e2e8f0",
+                    }}
+                  />
+                  <Bar
+                    dataKey="value"
+                    fill={CHART_COLORS[0]}
+                    name="Valor (R$)"
+                    radius={[6, 6, 0, 0]}
+                  />
                 </BarChart>
               </ResponsiveContainer>
             )}

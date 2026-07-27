@@ -1,9 +1,83 @@
 @import "tailwindcss";
 
+@theme {
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Syne", "DM Sans", ui-sans-serif, system-ui, sans-serif;
+
+  --color-thora-ink: #0b1520;
+  --color-thora-steel: #1a4f6e;
+  --color-thora-sky: #2f7aa8;
+  --color-thora-mist: #e8eef3;
+  --color-thora-sand: #f3f1ec;
+  --color-thora-accent: #0f766e;
+}
+
 @layer base {
   html,
   body,
   #root {
     height: 100%;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    color: var(--color-thora-ink);
+    background-color: #f4f7fa;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1,
+  h2,
+  h3,
+  .font-display {
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--color-thora-sky) 28%, transparent);
+  }
+}
+
+@layer utilities {
+  .app-canvas {
+    background-color: #f4f7fa;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 0% -10%, rgba(47, 122, 168, 0.12), transparent 55%),
+      radial-gradient(ellipse 60% 40% at 100% 0%, rgba(15, 118, 110, 0.08), transparent 50%),
+      linear-gradient(180deg, #eef3f7 0%, #f4f7fa 40%, #f7f8f6 100%);
+  }
+
+  .auth-canvas {
+    background-color: #0b1520;
+    background-image:
+      radial-gradient(ellipse 70% 55% at 15% 20%, rgba(47, 122, 168, 0.35), transparent 55%),
+      radial-gradient(ellipse 50% 40% at 90% 80%, rgba(15, 118, 110, 0.22), transparent 50%),
+      linear-gradient(160deg, #0b1520 0%, #132433 45%, #0f1c28 100%);
+  }
+
+  .surface-panel {
+    @apply rounded-2xl border border-slate-200/80 bg-white/90 shadow-sm backdrop-blur-sm;
+  }
+
+  .surface-inset {
+    @apply rounded-2xl border border-slate-200/70 bg-white/70;
+  }
+
+  .page-title {
+    @apply font-display text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl;
+  }
+
+  .page-subtitle {
+    @apply mt-1.5 text-sm text-slate-600 sm:text-base;
+  }
+
+  .input-field {
+    @apply mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-900 shadow-sm placeholder:text-slate-400 transition focus:border-thora-sky focus:outline-none focus:ring-2 focus:ring-thora-sky/30;
   }
 }

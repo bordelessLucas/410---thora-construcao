@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import abc_stubs, analise, export, health, process, tables, uploads
+from app.api.routes import abc_stubs, analise, curva_abc, export, health, process, tables, uploads
 from app.config import (
     API_DESCRIPTION,
     API_TITLE,
@@ -38,6 +38,7 @@ def create_app() -> FastAPI:
     application.include_router(export.router)
     application.include_router(abc_stubs.router)
     application.include_router(analise.router)
+    application.include_router(curva_abc.router)
 
     logger.info("Thora API v%s iniciada", API_VERSION)
     return application

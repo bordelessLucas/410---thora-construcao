@@ -1037,6 +1037,23 @@ export const getCurvaABC = async (uploadId: string) => {
   }
 };
 
+/** Recalcula ABC canônica no backend (fonte de verdade). */
+export const classifyCurvaAbc = async (
+  items: unknown[],
+  uploadId?: string,
+) => {
+  const response = await apiClient.post("/api/curva-abc/classify", {
+    items,
+    upload_id: uploadId,
+  });
+  return response.data as {
+    status: string;
+    items: unknown[];
+    summary: Record<string, unknown>;
+    abc_summary: Record<string, unknown>;
+  };
+};
+
 // ==================== EXPORT OPERATIONS ====================
 
 export type ExportXlsxPayload = {

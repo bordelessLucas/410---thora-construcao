@@ -134,21 +134,39 @@ const mapStructuredItemsToValidation = (
   let id = 0;
 
   for (const item of items) {
-    const tipo = String(item.tipo ?? "item").toLowerCase();
     const description = String(item.descricao ?? item.Descrição ?? "").trim();
     const itemNumero = String(item.item ?? item.item_numero ?? "").trim();
     const codigoCatalogo = String(item.codigo ?? item.Código ?? "").trim();
+    const tipo = String(item.tipo_linha ?? item.tipo ?? "item").toLowerCase();
     if (tipo === "grupo" || description.toLowerCase().includes("total do grupo")) {
       continue;
     }
 
-    const { qty, bdi, unitPrice } = resolveStructuredItemPricing(item);
-    const valorTotalPdf = toNumber(item.valor_total ?? item.Total);
+    const pricing = resolveStructuredItemPricing(item);
+    const {
+      qty,
+      bdi,
+      unitPrice,
+      unitPriceComBdi,
+      valorTotalSemBdi,
+      valorTotalComBdi,
+      quarantine,
+      alerts,
+      confidence,
+    } = pricing;
+
+    const backendClassification = (item as { classification?: string }).classification;
+    const classification =
+      backendClassification === "A" ||
+      backendClassification === "B" ||
+      backendClassification === "C"
+        ? backendClassification
+        : undefined;
 
     mapped.push({
       id: ++id,
       item: itemNumero,
-      tipo: String(item.tipo ?? "item"),
+      tipo: String(item.tipo_linha ?? item.tipo ?? "item"),
       banco: String(item.banco ?? ""),
       code: itemNumero || codigoCatalogo || String(id).padStart(3, "0"),
       catalogCode: codigoCatalogo || undefined,
@@ -157,13 +175,23 @@ const mapStructuredItemsToValidation = (
       unit: String(item.unidade ?? item.Unidade ?? "un").trim() || "un",
       qty,
       unitPrice,
-      lineTotal: valorTotalPdf > 0 ? valorTotalPdf : 0,
+      lineTotal: valorTotalComBdi > 0 ? valorTotalComBdi : 0,
+      valorUnitarioSemBdi: unitPrice,
+      valorUnitarioComBdi: unitPriceComBdi,
+      valorTotalSemBdi,
+      valorTotalComBdi,
       referenceUnitPrice: unitPrice > 0 ? unitPrice : undefined,
-      referenceLineTotal: valorTotalPdf > 0 ? valorTotalPdf : undefined,
+      referenceLineTotal: valorTotalComBdi > 0 ? valorTotalComBdi : undefined,
       selected: false,
-      extractionConfidence:
-        typeof item.confianca === "number" ? item.confianca : undefined,
-      extractionAlerts: Array.isArray(item.alertas) ? item.alertas : undefined,
+      classification,
+      quarantine,
+      abcEligible: quarantine ? false : (item as { abc_elegivel?: boolean }).abc_elegivel !== false,
+      extractionConfidence: confidence,
+      extractionAlerts: alerts.length
+        ? alerts
+        : Array.isArray(item.alertas)
+          ? item.alertas
+          : undefined,
     });
   }
 
@@ -922,14 +950,14 @@ export default function ValidacaoOrcamento() {
         onCancel={() => setDeleteItemId(null)}
       />
 
-      <div className="shrink-0 border-b border-slate-200 bg-slate-50/90 px-4 py-4 sm:px-6">
+      <div className="shrink-0 border-b border-slate-200/80 bg-white/80 px-4 py-4 backdrop-blur-sm sm:px-6">
         <WizardStepper
           steps={ANALISE_ORCAMENTO_WIZARD_STEPS}
           currentStep={ANALISE_ORCAMENTO_VALIDATION_STEP}
         />
       </div>
 
-      <header className="z-20 flex min-h-16 shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 shadow-sm sm:px-6">
+      <header className="z-20 flex min-h-16 shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-200/80 bg-white/95 px-4 py-3 shadow-sm backdrop-blur-sm sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <button
             type="button"
@@ -940,7 +968,7 @@ export default function ValidacaoOrcamento() {
             <ArrowLeft className="h-5 w-5" />
           </button>
           <div className="min-w-0">
-            <h1 className="truncate text-2xl font-bold leading-tight text-slate-900">
+            <h1 className="truncate font-display text-2xl font-bold leading-tight text-slate-900">
               Validação — Análise de Orçamento
             </h1>
             <p className="flex flex-wrap items-center gap-1 text-xs text-slate-500">

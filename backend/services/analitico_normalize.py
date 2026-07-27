@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from app.domain.money import parse_brl
+
 _GROUP_PREFIX_RE = re.compile(r"^\s*(\d+)")
 _GROUP_PREFIX_DESC_RE = re.compile(r"^\s*(\d+)\s*[-–—\.\)]")
 
@@ -33,29 +35,25 @@ _GENERIC_UNCODED_PHANTOM_PREFIXES = (
 
 
 def parse_numeric(value: Any) -> float:
-    """Remove pontos de milhar e troca vírgula decimal por ponto (pt-BR)."""
-    if value is None or value == "":
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    clean_str = str(value).replace(".", "").replace(",", ".")
-    try:
-        return float(clean_str)
-    except ValueError:
-        return 0.0
+    """Alias canônico — sempre usa parse_brl (nunca remove todos os pontos)."""
+    return parse_brl(value)
 
 
 def _coerce_number(value: Any) -> float:
-    return parse_numeric(value)
+    return parse_brl(value)
 
 
 def _coerce_bdi(value: Any) -> float:
     if value is None or value == "":
         return 0.0
     if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip().replace("%", "").replace(" ", "")
-    return _coerce_number(text)
+        raw = float(value)
+    else:
+        text = str(value).strip().replace("%", "").replace(" ", "")
+        raw = parse_brl(text)
+    if 0 < raw <= 100:
+        return raw
+    return 0.0
 
 
 def _row_descricao(row: Dict[str, Any]) -> str:
