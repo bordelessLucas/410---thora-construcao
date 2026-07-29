@@ -9,3 +9,6 @@ backend/logs/
 thora_construcao_vercel.egg-info/
 *.egg-info/
 firebase-debug.log
+.tools/
+backend/test_pdfs/*.pdf
+backend/test_pdfs/*_result.json
