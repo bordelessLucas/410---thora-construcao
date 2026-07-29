@@ -16,7 +16,7 @@ async def process_orcamento_tables(
     payload: ProcessTablesRequest,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Extrai e analisa tabelas selecionadas com OpenAI (híbrido + parser local)."""
+    """Extrai via pipeline 5 engines; OpenAI só insights opcionais sobre JSON."""
     t0 = time.perf_counter()
     logger.info(
         "[process-tables] INÍCIO upload=%s tables=%s tipos=%s user=%s",

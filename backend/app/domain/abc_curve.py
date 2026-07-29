@@ -32,6 +32,16 @@ _COMPOSICAO_KEYWORDS = (
 
 _ITEM_NUM_EXEC = re.compile(r"^\d+\.\d+\.\d+")
 _ITEM_NUM_GROUP = re.compile(r"^\d+(?:\.\d+)?$")
+_ITEM_NUM_PREFIX = re.compile(r"^(\d+(?:\.\d+)*)")
+
+
+def normalize_item_numero(value: Any) -> str:
+    """Extrai numeração hierárquica limpa (ex.: '1.2 BOTA-FORA' → '1.2')."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = _ITEM_NUM_PREFIX.match(text)
+    return match.group(1) if match else text
 
 
 def infer_tipo_linha(
@@ -52,7 +62,7 @@ def infer_tipo_linha(
     """
     desc = (descricao or "").strip()
     desc_norm = desc.lower()
-    item_stripped = (item_numero or "").strip()
+    item_stripped = normalize_item_numero(item_numero)
     codigo = (codigo or "").strip()
     hint = (tipo_hint or "").strip().lower()
 
@@ -61,13 +71,49 @@ def infer_tipo_linha(
 
     has_financial = quantidade > 0 or valor_unitario > 0 or valor_total > 0
     is_xyz = bool(item_stripped and _ITEM_NUM_EXEC.match(item_stripped))
+    is_group_num = bool(item_stripped and _ITEM_NUM_GROUP.match(item_stripped) and not is_xyz)
 
-    # NOVACAP: serviço executivo padrão
+    # NOVACAP: serviço executivo padrão X.Y.Z
     if is_xyz and (valor_total > 0 or (quantidade > 0 and valor_unitario > 0)):
         return "item"
 
+    # Planilha plana (001 / códigos simples) com Qtd × VU ≈ Total → item
+    # Distingue de grupo sintético (qtd=1 e VU≈Total).
+    raw_num = str(item_numero or "").strip()
+    priced_line = (
+        quantidade > 0
+        and valor_unitario > 0
+        and valor_total > 0
+        and abs(quantidade * valor_unitario - valor_total) <= max(0.05, valor_total * 0.02)
+    )
+    if priced_line and (
+        quantidade > 1
+        or abs(valor_unitario - valor_total) > 0.02
+        or (raw_num.isdigit() and raw_num.startswith("0"))
+        or hint in {"item", "servico", "serviço", "folha"}
+    ):
+        return "item"
+
+    # X ou X.Y sem código = cabeçalho de grupo (mesmo com total no sintético)
+    if is_group_num and not codigo:
+        return "grupo"
+
+    # Código que na verdade é descrição (linha de grupo com colunas desalinhadas)
+    if is_group_num and codigo:
+        codigo_limpo = codigo.strip()
+        if (
+            len(codigo_limpo) > 40
+            or (codigo_limpo == item_stripped)
+            or (" " in codigo_limpo and len(codigo_limpo) > 20)
+            or codigo_limpo.upper() == desc[: len(codigo_limpo)].upper()
+        ):
+            return "grupo"
+
+    if hint in {"grupo", "group", "titulo", "título"} and not codigo:
+        return "grupo"
+
     if not has_financial:
-        if item_stripped and _ITEM_NUM_GROUP.match(item_stripped):
+        if is_group_num:
             return "grupo"
         letters = re.sub(r"[^A-Za-zÀ-ÿ]", "", desc)
         if letters and desc == desc.upper() and len(letters) >= 6:
@@ -78,15 +124,25 @@ def infer_tipo_linha(
         return "composicao"
 
     if hint in {"composicao", "composição", "insumo", "subitem"} and not is_xyz:
-        # Só respeita hint de composição se NÃO for numeração executiva
         return "composicao"
 
-    if codigo and quantidade > 0:
+    if not item_stripped and not is_xyz:
+        tipo_cell = hint or ""
+        if any(k in tipo_cell for k in ("compos", "insumo", "auxiliar")):
+            return "composicao"
+
+    # Serviço executivo: X.Y.Z ou X.Y/X com código de catálogo + financeiro (folhas 4.1, 7.1, 6.4…)
+    codigo_ok = bool(codigo) and not (
+        len(codigo) > 40
+        or (" " in codigo and len(codigo) > 20)
+        or codigo == item_stripped
+    )
+    if codigo_ok and (valor_total > 0 or (quantidade > 0 and valor_unitario > 0)):
         return "item"
-    if quantidade > 0 and valor_unitario > 0:
+    if is_xyz and (valor_total > 0 or (quantidade > 0 and valor_unitario > 0)):
         return "item"
-    if valor_total > 0 and desc:
-        return "item"
+    if is_group_num:
+        return "grupo"
 
     return "composicao"
 
@@ -110,6 +166,38 @@ def is_executive_for_abc(item: dict[str, Any]) -> bool:
     return vt > 0
 
 
+def _item_numero_of(item: dict[str, Any]) -> str:
+    return normalize_item_numero(item.get("item_numero") or item.get("item") or "")
+
+
+def drop_non_leaf_executives(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Remove pais hierárquicos quando há filhos na mesma lista (evita 1.2 + 1.2.1).
+
+    Mantém serviço precificado (qtd×VU) mesmo com filho fantasma por numeração
+    inconsistente no PDF (ex.: 3.1.1 e 3.1.1.1 em seções diferentes).
+    """
+    numbers = {_item_numero_of(i) for i in items if _item_numero_of(i)}
+    out: list[dict[str, Any]] = []
+    for item in items:
+        num = _item_numero_of(item)
+        has_child = bool(num) and any(other.startswith(num + ".") for other in numbers)
+        if has_child:
+            qty = float(item.get("quantidade") or 0)
+            vu = float(
+                item.get("valor_unitario_com_bdi")
+                or item.get("valor_unitario")
+                or 0
+            )
+            codigo = str(item.get("codigo") or "").strip()
+            total = line_total_com_bdi(item)
+            priced = qty > 0 and vu > 0 and (codigo or abs(vu - total) > 0.02)
+            if not priced:
+                continue
+        out.append(item)
+    return out
+
+
 def line_total_com_bdi(item: dict[str, Any]) -> float:
     return parse_brl(
         item.get("valor_total_com_bdi")
@@ -123,7 +211,8 @@ def enrich_item_pricing_and_type(raw: dict[str, Any]) -> dict[str, Any]:
     item = dict(raw)
     descricao = str(item.get("descricao") or item.get("description") or "").strip()
     codigo = str(item.get("codigo") or item.get("code") or "").strip()
-    item_numero = str(item.get("item_numero") or item.get("item") or "").strip()
+    raw_item_numero = str(item.get("item_numero") or item.get("item") or "").strip()
+    item_numero = normalize_item_numero(raw_item_numero)
     tipo_hint = str(item.get("tipo_linha") or item.get("tipo") or "").strip()
 
     pricing = resolve_pricing_contract(
@@ -140,10 +229,10 @@ def enrich_item_pricing_and_type(raw: dict[str, Any]) -> dict[str, Any]:
     tipo = infer_tipo_linha(
         descricao=descricao,
         quantidade=pricing["quantidade"],
-        valor_unitario=pricing["valor_unitario_sem_bdi"],
+        valor_unitario=pricing["valor_unitario_com_bdi"] or pricing["valor_unitario_sem_bdi"],
         valor_total=pricing["valor_total_com_bdi"],
         codigo=codigo,
-        item_numero=item_numero,
+        item_numero=raw_item_numero or item_numero,
         tipo_hint=tipo_hint,
     )
 
@@ -197,7 +286,9 @@ def classify_abc_items(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     enriched = [enrich_item_pricing_and_type(dict(i)) for i in items if isinstance(i, dict)]
 
     executives = [i for i in enriched if is_executive_for_abc(i)]
-    others = [i for i in enriched if not is_executive_for_abc(i)]
+    executives = drop_non_leaf_executives(executives)
+    executive_ids = {id(i) for i in executives}
+    others = [i for i in enriched if id(i) not in executive_ids]
 
     executives.sort(
         key=lambda i: (

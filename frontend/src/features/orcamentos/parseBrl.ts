@@ -39,11 +39,13 @@ export function parseBrl(value: unknown): number {
       text = text.replace(/,/g, "");
     }
   } else if (text.includes(",")) {
+    // Só vírgula: sempre decimal BR (inclui coeficientes 0,0006000 / 1,0000000).
+    // Nunca remover a vírgula — isso transformava 1,0000000 → 10_000_000.
     const parts = text.split(",");
-    if (parts.length === 2 && (parts[1]?.length ?? 0) <= 4) {
-      text = text.replace(/\./g, "").replace(",", ".");
+    if (parts.length === 2 && /^\d+$/.test(parts[1] ?? "")) {
+      text = `${parts[0]}.${parts[1]}`;
     } else {
-      text = text.replace(/,/g, "");
+      text = text.replace(/,/g, ".");
     }
   } else if (text.includes(".")) {
     const parts = text.split(".");

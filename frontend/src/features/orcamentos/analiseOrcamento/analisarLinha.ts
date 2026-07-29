@@ -112,14 +112,27 @@ export function analisarLinhaOrcamento(
       : `Subtotal divergente: esperado ${subtotalCalculado}, informado ${subtotalInformado}.`,
   });
 
-  if (linha.bdiPercent > 0) {
-    const totalComBdiCalculado = roundMoney(subtotalInformado * (1 + linha.bdiPercent / 100));
-    const totalComBdiInformado =
+  // Sintético / planilha com VU já c/BDI: qty×VU ≈ total c/BDI → BDI embutido
+  const totalComBdiInformado =
+    linha.precoTotalComBdi > 0 ? linha.precoTotalComBdi : 0;
+  const pricesAlreadyIncludeBdi =
+    totalComBdiInformado > 0 &&
+    compararValores(
+      subtotalCalculado,
+      totalComBdiInformado,
+      toleranciaMonetariaEfetiva(totalComBdiInformado, resolved.toleranciaMonetaria),
+    ).ok;
+
+  const bdiEfetivo = pricesAlreadyIncludeBdi ? 0 : linha.bdiPercent;
+
+  if (bdiEfetivo > 0) {
+    const totalComBdiCalculado = roundMoney(subtotalInformado * (1 + bdiEfetivo / 100));
+    const totalInformado =
       linha.precoTotalComBdi > 0 ? linha.precoTotalComBdi : totalComBdiCalculado;
     const bdiCheck = compararValores(
       totalComBdiCalculado,
-      totalComBdiInformado,
-      toleranciaMonetariaEfetiva(totalComBdiInformado, resolved.toleranciaMonetaria),
+      totalInformado,
+      toleranciaMonetariaEfetiva(totalInformado, resolved.toleranciaMonetaria),
     );
 
     verificacoes.push({
@@ -127,11 +140,11 @@ export function analisarLinhaOrcamento(
       status: bdiCheck.ok ? "ok" : "divergente",
       severidade: bdiCheck.ok ? "info" : "erro",
       valorCalculado: totalComBdiCalculado,
-      valorInformado: totalComBdiInformado,
+      valorInformado: totalInformado,
       diferenca: roundMoney(bdiCheck.diferenca),
       mensagem: bdiCheck.ok
-        ? `${subtotalInformado} × (1 + ${linha.bdiPercent}%) = ${totalComBdiCalculado}`
-        : `Total c/ BDI divergente: esperado ${totalComBdiCalculado}, informado ${totalComBdiInformado}.`,
+        ? `${subtotalInformado} × (1 + ${bdiEfetivo}%) = ${totalComBdiCalculado}`
+        : `Total c/ BDI divergente: esperado ${totalComBdiCalculado}, informado ${totalInformado}.`,
     });
 
     const deveVerificarBdiDocumento =
@@ -139,7 +152,7 @@ export function analisarLinhaOrcamento(
 
     if (deveVerificarBdiDocumento) {
       const bdiGlobalCheck = linhaBdiConfereDocumento(
-        linha.bdiPercent,
+        bdiEfetivo,
         resolved.bdisValidosDocumento,
         resolved.bdiGlobalPercent,
         resolved.toleranciaPercentual,
@@ -155,13 +168,13 @@ export function analisarLinhaOrcamento(
         status: bdiGlobalCheck ? "ok" : "alerta",
         severidade: bdiGlobalCheck ? "info" : "alerta",
         valorCalculado: resolved.bdiGlobalPercent,
-        valorInformado: linha.bdiPercent,
-        diferenca: roundMoney(Math.abs(linha.bdiPercent - resolved.bdiGlobalPercent)),
+        valorInformado: bdiEfetivo,
+        diferenca: roundMoney(Math.abs(bdiEfetivo - resolved.bdiGlobalPercent)),
         mensagem: bdiGlobalCheck
           ? resolved.bdisValidosDocumento.length > 1
-            ? `BDI ${linha.bdiPercent}% confere com os BDIs do documento (${bdisLabel}).`
-            : `BDI ${linha.bdiPercent}% confere com o BDI predominante (${bdisLabel}).`
-          : `BDI da linha (${linha.bdiPercent}%) não corresponde aos BDIs do documento (${bdisLabel}).`,
+            ? `BDI ${bdiEfetivo}% confere com os BDIs do documento (${bdisLabel}).`
+            : `BDI ${bdiEfetivo}% confere com o BDI predominante (${bdisLabel}).`
+          : `BDI da linha (${bdiEfetivo}%) não corresponde aos BDIs do documento (${bdisLabel}).`,
       });
     }
   } else {
@@ -169,7 +182,9 @@ export function analisarLinhaOrcamento(
       regraId: "CALC_BDI",
       status: "nao_aplicavel",
       severidade: "info",
-      mensagem: "BDI não informado na linha.",
+      mensagem: pricesAlreadyIncludeBdi
+        ? "Preços já incluem BDI (Qtd × VU ≈ Total c/BDI)."
+        : "BDI não informado na linha.",
     });
   }
 

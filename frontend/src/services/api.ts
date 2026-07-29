@@ -139,13 +139,46 @@ export const ensureApiReady = async (): Promise<void> => {
   );
 };
 
-const parseApiError = (error: unknown, fallback: string): string => {
-  const err = error as { response?: { data?: { detail?: unknown }; status?: number } };
-  const detail = err.response?.data?.detail;
+const formatApiDetail = (detail: unknown, fallback: string): string => {
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) {
     return detail.map((d: { msg?: string }) => d?.msg).join("; ") || fallback;
   }
+  if (detail && typeof detail === "object") {
+    const obj = detail as {
+      message?: string;
+      validacao_financeira?: {
+        alertas?: string[];
+        errors?: string[];
+        diferenca_total?: number;
+        total_geral?: { diferenca?: number; alertas?: string[] };
+      };
+    };
+    const parts: string[] = [];
+    if (obj.message) parts.push(obj.message);
+    const vf = obj.validacao_financeira;
+    if (vf) {
+      const alerts = [
+        ...(Array.isArray(vf.alertas) ? vf.alertas : []),
+        ...(Array.isArray(vf.errors) ? vf.errors : []),
+        ...(Array.isArray(vf.total_geral?.alertas) ? vf.total_geral.alertas : []),
+      ];
+      if (alerts.length) parts.push(alerts.join("; "));
+      const diff = vf.diferenca_total ?? vf.total_geral?.diferenca;
+      if (typeof diff === "number" && Number.isFinite(diff)) {
+        parts.push(`Diferença financeira: R$ ${diff.toFixed(2)}`);
+      }
+    }
+    if (parts.length) return parts.join(" — ");
+  }
+  return fallback;
+};
+
+const parseApiError = (error: unknown, fallback: string): string => {
+  const err = error as { response?: { data?: { detail?: unknown }; status?: number } };
+  const detail = err.response?.data?.detail;
+  const formatted = formatApiDetail(detail, "");
+  if (formatted) return formatted;
   if (isRenderColdStartError(error)) {
     return (
       "Servidor da API no Render está acordando ou indisponível (502/503). " +
@@ -802,7 +835,7 @@ export const processAnaliticoFullBatch = async (
   }
 };
 
-/** Processa tabelas escolhidas com parser local (sem IA). */
+/** Processa tabelas via pipeline 5 engines (OpenAI só insights opcionais). */
 export const processOrcamentoTables = async (
   uploadId: string,
   tableIds: string[],
@@ -833,11 +866,15 @@ export const processOrcamentoTables = async (
       items_found: number;
       analysis_types: string[];
       engine: string;
+      pages_processed?: number[];
       tables: unknown[];
       items: unknown[];
       structured_items?: unknown[];
       hierarchical_items?: unknown[];
       resumo: Record<string, unknown>;
+      abc_summary?: Record<string, unknown>;
+      validacao_financeira?: Record<string, unknown>;
+      ia_metadata?: Record<string, unknown>;
       message: string;
     };
   } catch (error: unknown) {
@@ -845,15 +882,7 @@ export const processOrcamentoTables = async (
       `[api] process-tables falhou em ${((Date.now() - started) / 1000).toFixed(1)}s`,
       error,
     );
-    const err = error as { response?: { data?: { detail?: unknown } } };
-    const detail = err.response?.data?.detail;
-    const msg =
-      typeof detail === "string"
-        ? detail
-        : Array.isArray(detail)
-          ? detail.map((d: { msg?: string }) => d?.msg).join("; ")
-          : "Erro ao processar tabelas";
-    throw new Error(msg);
+    throw new Error(parseApiError(error, "Erro ao processar tabelas"));
   }
 };
 

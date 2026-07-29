@@ -73,6 +73,48 @@ function aggregateBatchProgress(jobs: AnaliticoBatchJobStatus[]): number {
   return computeProgressPercent(done, total);
 }
 
+/** Previews das tabelas nas páginas que o pipeline de fato analisou (não só a selecionada). */
+function buildAnalyzedTablePreviews(
+  tableOptions: MockTableOption[],
+  selectedIds: string[],
+  pagesProcessed: number[],
+): OrcamentoWizardResult["selectedTablePreviews"] {
+  const pageSet = new Set(
+    pagesProcessed.filter((p) => Number.isFinite(p) && p >= 1).map((p) => Math.trunc(p)),
+  );
+
+  let pool: MockTableOption[] = [];
+  if (pageSet.size > 0) {
+    const onPages = tableOptions.filter((t) => pageSet.has(Number(t.page)));
+    const budgetish = onPages.filter(
+      (t) => t.is_budget_likely !== false && !/composi[cç]|curva\s*abc|mem[oó]ria/i.test(t.name),
+    );
+    pool = budgetish.length > 0 ? budgetish : onPages;
+  }
+
+  if (pool.length === 0) {
+    pool = tableOptions.filter((t) => selectedIds.includes(t.id));
+  }
+
+  const seen = new Set<string>();
+  const ordered = [...pool].sort(
+    (a, b) => Number(a.page) - Number(b.page) || a.name.localeCompare(b.name, "pt-BR"),
+  );
+
+  return ordered
+    .filter((t) => {
+      if (seen.has(t.id)) return false;
+      seen.add(t.id);
+      return Boolean(t.imagem_base64?.trim());
+    })
+    .map((t) => ({
+      id: t.id,
+      name: t.name,
+      page: t.page,
+      imagem_base64: t.imagem_base64,
+    }));
+}
+
 function getWizardStep(phase: FlowPhase, mode: WizardMode): number {
   if (mode === "full_pdf") {
     switch (phase) {
@@ -624,7 +666,7 @@ export function OrcamentoPdfWizard({
     );
 
     setPhase("processing_ai");
-    setProcessingDetail("IA analisando tabelas selecionadas…");
+    setProcessingDetail("Pipeline extraindo e validando o orçamento…");
     setProgressPercent(10);
     setErrorMessage("");
     pauseBackendStatusMonitor("process-tables");
@@ -633,16 +675,6 @@ export function OrcamentoPdfWizard({
     );
 
     try {
-      const selectedTablePreviews = selectedTableIds
-        .map((id) => tableOptions.find((t) => t.id === id))
-        .filter((t): t is MockTableOption => Boolean(t))
-        .map((t) => ({
-          id: t.id,
-          name: t.name,
-          page: t.page,
-          imagem_base64: t.imagem_base64,
-        }));
-
       setProgressPercent(40);
       const result = await processOrcamentoTables(
         uploadId,
@@ -653,6 +685,38 @@ export function OrcamentoPdfWizard({
 
       setProgressPercent(100);
       setProcessingDetail("Análise concluída — abrindo validação…");
+
+      const pagesFromMeta = Array.isArray(result.ia_metadata?.pages_processed)
+        ? (result.ia_metadata.pages_processed as number[])
+        : [];
+      const pagesProcessed = (
+        Array.isArray(result.pages_processed) && result.pages_processed.length > 0
+          ? result.pages_processed
+          : pagesFromMeta
+      ).map(Number);
+
+      // Mostra todas as tabelas detectadas nas páginas analisadas pelo pipeline
+      const analyzedPreviews = buildAnalyzedTablePreviews(
+        tableOptions,
+        selectedTableIds,
+        pagesProcessed,
+      );
+      const selectedTablePreviews =
+        analyzedPreviews.length > 0
+          ? analyzedPreviews
+          : selectedTableIds
+              .map((id) => tableOptions.find((t) => t.id === id))
+              .filter((t): t is MockTableOption => Boolean(t))
+              .map((t) => ({
+                id: t.id,
+                name: t.name,
+                page: t.page,
+                imagem_base64: t.imagem_base64,
+              }));
+      const analyzedTableIds =
+        selectedTablePreviews.length > 0
+          ? selectedTablePreviews.map((p) => p.id)
+          : selectedTableIds;
 
       const itemsFound = Number(result.items_found ?? result.items?.length ?? 0);
       const expectedRows = selectedTableIds.reduce((sum, id) => {
@@ -677,18 +741,27 @@ export function OrcamentoPdfWizard({
           ia_metadata: result.ia_metadata ?? {
             engine: result.engine,
             analysis_types: result.analysis_types,
+            pages_processed: pagesProcessed,
           },
         },
         file,
-        selectedTableIds,
+        analyzedTableIds,
         selectedTablePreviews,
       );
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : "Erro ao processar tabelas";
       console.error("[wizard] process-tables falhou:", error);
-      setErrorMessage(msg);
+      const isFinanceReject =
+        /validação financeira|Total Geral|subtotal|diferença financeira/i.test(msg);
+      setErrorMessage(
+        isFinanceReject
+          ? `Extração rejeitada: ${msg}. Corrija o PDF ou selecione outra tabela.`
+          : msg,
+      );
       setPhase("selecting_analysis");
-      toast.error("Falha na análise", { description: msg });
+      toast.error(isFinanceReject ? "Validação financeira falhou" : "Falha na análise", {
+        description: msg,
+      });
     } finally {
       resumeBackendStatusMonitor();
     }

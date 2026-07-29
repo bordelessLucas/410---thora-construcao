@@ -32,7 +32,9 @@ class BudgetParser:
     ITEM_NUMERO_KEYWORDS = ['item', 'item n', 'nº item', 'n° item', 'nº', 'n°']
     BANCO_KEYWORDS = ['fonte', 'banco', 'base', 'origem', 'tabela']
     TOTAL_COM_BDI_KEYWORDS = ['c/ bdi', 'com bdi', 'c/bdi', 'c/ encargos', 'total c/']
-    BDI_KEYWORDS = ['bdi', '% bdi', 'encargos']
+    BDI_KEYWORDS = ['bdi %', '% bdi', 'bdi%', 'bdi (%)', '%bdi']
+    BDI_STANDALONE = ('bdi', 'b.d.i', 'b.d.i.')
+    PESO_KEYWORDS = ['peso', 'peso (%)', '% peso', 'particip', 'participação']
     
     # Palavras para ignorar (linhas de totalizações)
     IGNORE_KEYWORDS = [
@@ -65,6 +67,11 @@ class BudgetParser:
     def is_header_row(self, row: List[Any]) -> bool:
         """Verifica se a linha é um cabeçalho"""
         if not row:
+            return False
+
+        # Linha de item hierárquico nunca é cabeçalho
+        first = str(row[0]).strip() if row else ""
+        if self.looks_like_item_number(first):
             return False
         
         # Converte para texto minúsculo
@@ -135,10 +142,16 @@ class BudgetParser:
         }
 
     def looks_like_item_number(self, value: Any) -> bool:
+        """Aceita 1, 1.1, 1.1.2… (regex do pipeline por coordenadas)."""
         text = str(value or "").strip()
         if not text:
             return False
-        return bool(re.match(r"^\d+(?:\.\d+)+$", text))
+        if not re.match(r"^\d+(?:\.\d+)*$", text):
+            return False
+        # Evita telefone/CEP soltos no rodapé (ex.: "92")
+        if text.isdigit() and int(text) > 40:
+            return False
+        return True
 
     def _cell_text(self, row: List[Any], index: int) -> str:
         if index < 0 or index >= len(row):
@@ -172,6 +185,132 @@ class BudgetParser:
             if self.looks_like_item_number(cell):
                 return idx
         return -1
+
+    def try_parse_sintetico_row(self, row: List[Any]) -> Optional[Dict[str, Any]]:
+        """
+        Orçamento Sintético (NOVACAP/edital):
+        - Executivo: Item | Código | Banco | Desc | Und | Qtd | VU c/BDI | Total | Peso%
+        - Grupo: Item | Desc | Qtd | VU | Total | Peso%  (colunas esparsas)
+        """
+        cells = [self._cell_text(row, i) for i in range(len(row)) if self._cell_text(row, i)]
+        if not cells or not self.looks_like_item_number(cells[0]):
+            return None
+
+        item_numero = cells[0]
+        depth = item_numero.count(".")
+        # Layout executivo completo: Item|Código|Banco|Desc|Und|Qtd|VU|Total|Peso
+        is_executive_layout = len(cells) >= 7 and depth >= 1
+
+        money_idxs: list[int] = []
+        for i, c in enumerate(cells):
+            if i == 0:
+                continue
+            # Ignora peso% e textos com % no meio da descrição
+            if "%" in c and len(c) < 16:
+                continue
+            # "4.083,30 (BDI 15,28%)" ou dinheiro puro
+            if re.match(r"^[\d.]+,\d{2}(?:\s*\(.*\))?$", c.replace("R$", "").strip()) or (
+                re.match(r"^[\d.]+,\d{2}", c) and i >= len(cells) - 4
+            ):
+                money_idxs.append(i)
+                continue
+            if re.match(r"^\d{1,3}(?:\.\d{3})+,\d{2}", c):
+                money_idxs.append(i)
+
+        if not money_idxs:
+            return None
+
+        def _money_at(i: int) -> float:
+            c = cells[i]
+            m = re.match(r"^([\d.]+,\d{2})", c.replace("R$", "").strip())
+            return self.parse_number(m.group(1) if m else c)
+
+        valor_total = _money_at(money_idxs[-1])
+        valor_unitario = _money_at(money_idxs[-2]) if len(money_idxs) >= 2 else valor_total
+
+        # qty: célula numérica antes do VU
+        vu_i = money_idxs[-2] if len(money_idxs) >= 2 else money_idxs[-1]
+        quantidade = 0.0
+        for j in range(vu_i - 1, 0, -1):
+            c = cells[j]
+            if "%" in c:
+                continue
+            if re.match(r"^[\d.,]+$", c):
+                quantidade = self.parse_number(c)
+                break
+
+        if depth <= 1 and not is_executive_layout and quantidade <= 0:
+            quantidade = 1.0
+
+        codigo = ""
+        banco = ""
+        unidade = "un"
+        descricao = ""
+
+        if is_executive_layout:
+            codigo = cells[1]
+            banco = cells[2]
+            for j in range(vu_i - 1, 2, -1):
+                c = cells[j]
+                if re.match(r"^[\d.,]+$", c):
+                    continue
+                if len(c) <= 6:
+                    unidade = c
+                    descricao = " ".join(cells[3:j])
+                    break
+            if not descricao:
+                descricao = cells[3]
+        else:
+            descricao = cells[1] if len(cells) > 1 else ""
+            if depth <= 1:
+                codigo = ""
+                banco = ""
+            if quantidade <= 0:
+                quantidade = 1.0
+
+        if not descricao or len(descricao) < 3:
+            return None
+        if valor_total <= 0 and quantidade <= 0 and valor_unitario <= 0:
+            return None
+
+        return {
+            "item_numero": item_numero,
+            "item": item_numero,
+            "banco": banco,
+            "codigo": codigo,
+            "descricao": descricao,
+            "quantidade": quantidade,
+            "unidade": unidade,
+            "bdi": 0.0,
+            "valor_unitario": valor_unitario,
+            "valor_total": valor_total,
+        }
+
+    def _looks_like_sintetico_continuation(self, rows: List[List[Any]]) -> bool:
+        xyz = 0
+        peso = 0
+        for row in rows[:25]:
+            cells = [self._cell_text(row, i) for i in range(len(row)) if self._cell_text(row, i)]
+            if not cells:
+                continue
+            if self.looks_like_item_number(cells[0]) and cells[0].count(".") >= 2:
+                xyz += 1
+            if any("%" in c and len(c) < 16 for c in cells[-3:]):
+                peso += 1
+        return xyz >= 5 and peso >= 5
+
+    def _sintetico_header(self) -> List[str]:
+        return [
+            "Item",
+            "Código",
+            "Banco",
+            "Descrição",
+            "Und",
+            "Quant.",
+            "Valor Unit com BDI",
+            "Total",
+            "Peso (%)",
+        ]
 
     def try_parse_novacap_row(self, row: List[Any]) -> Optional[Dict[str, Any]]:
         """Layout NOVACAP: Item | Fonte | Código | Descrição | Unid | Qtde | V.Unit | Total | BDI | Total c/ BDI."""
@@ -256,6 +395,10 @@ class BudgetParser:
         if len(joined) < 20 or not re.search(r"\d+\.\d+\.\d+", joined):
             return None
 
+        sintetico = self.try_parse_sintetico_row(row)
+        if sintetico:
+            return sintetico
+
         novacap = self.try_parse_novacap_row(row)
         if novacap:
             return novacap
@@ -325,7 +468,11 @@ class BudgetParser:
         for idx, row in enumerate(rows):
             if not row or self.is_header_row(row) or self.should_ignore_row(row):
                 continue
-            parsed = self.try_parse_novacap_row(row) or self.try_parse_loose_text_row(row)
+            parsed = (
+                self.try_parse_sintetico_row(row)
+                or self.try_parse_novacap_row(row)
+                or self.try_parse_loose_text_row(row)
+            )
             if not parsed:
                 continue
             items.append(
@@ -380,6 +527,14 @@ class BudgetParser:
                     merged[key] = fv
                 elif pv_num > 0:
                     merged[key] = pv_num
+            elif key == "codigo":
+                # Não deixar descrição longa no campo código
+                pv_s = str(pv or "").strip()
+                fv_s = str(fv or "").strip()
+                if (not pv_s or len(pv_s) > 48 or " " in pv_s and len(pv_s) > 20) and fv_s:
+                    merged[key] = fv_s
+                elif not pv_s and fv_s:
+                    merged[key] = fv_s
             elif (not pv or str(pv).strip() == "") and fv:
                 merged[key] = fv
         return merged
@@ -455,10 +610,19 @@ class BudgetParser:
                         break
 
             if structure['bdi'] == -1:
-                for keyword in self.BDI_KEYWORDS:
-                    if keyword in cell_lower:
+                # Nunca confundir "Valor Unit com BDI" / "Total c/ BDI" com coluna de BDI%
+                looks_like_price = any(
+                    token in cell_lower
+                    for token in ("valor", "preço", "preco", "unit", "total", "price")
+                )
+                if not looks_like_price:
+                    if cell_lower.strip() in self.BDI_STANDALONE:
                         structure['bdi'] = idx
-                        break
+                    else:
+                        for keyword in self.BDI_KEYWORDS:
+                            if keyword in cell_lower:
+                                structure['bdi'] = idx
+                                break
 
             if structure['descricao'] == -1:
                 for keyword in self.DESCRICAO_KEYWORDS:
@@ -486,12 +650,16 @@ class BudgetParser:
                         structure['valor_unitario'] = idx
                         break
 
-            if 'total' in cell_lower:
+            if 'total' in cell_lower and 'peso' not in cell_lower:
                 is_com_bdi = any(kw in cell_lower for kw in self.TOTAL_COM_BDI_KEYWORDS)
-                if is_com_bdi or ('bdi' in cell_lower and 'c/' in cell_lower):
+                if is_com_bdi or ('bdi' in cell_lower and ('c/' in cell_lower or 'com ' in cell_lower)):
                     structure['valor_total_com_bdi'] = idx
-                elif 'bdi' not in cell_lower and structure['valor_total_sem_bdi'] == -1:
+                elif structure['valor_total_sem_bdi'] == -1:
                     structure['valor_total_sem_bdi'] = idx
+
+            # "Valor Unit com BDI" é preço unitário, não total
+            if structure['valor_unitario'] == -1 and 'valor unit' in cell_lower and 'total' not in cell_lower:
+                structure['valor_unitario'] = idx
 
         if qty_plain >= 0:
             structure['quantidade'] = qty_plain
@@ -584,14 +752,59 @@ class BudgetParser:
             return items, structure
         
         # 1. Tentar identificar cabeçalho - procurar nas primeiras linhas
+        # Prefere cabeçalho real (Item|Código|Descrição|Total) a metadados ("Obra Bancos B.D.I.")
         header_idx = -1
+        best_header_score = -1
         for idx, row in enumerate(rows[:25]):
-            if self.is_header_row(row):
-                structure = self.identify_columns(row)
-                if structure.get('descricao', -1) != -1 or structure.get('codigo', -1) != -1:
-                    header_idx = idx
-                    logger.info(f"📋 Cabeçalho detectado na linha {idx}: {structure}")
-                    break
+            if not self.is_header_row(row):
+                continue
+            candidate = self.identify_columns(row)
+            score = sum(
+                1
+                for key in (
+                    "item_numero",
+                    "codigo",
+                    "descricao",
+                    "quantidade",
+                    "valor_unitario",
+                    "valor_total",
+                    "valor_total_sem_bdi",
+                    "valor_total_com_bdi",
+                )
+                if candidate.get(key, -1) >= 0
+            )
+            row_l = " ".join(str(c).lower() for c in row)
+            if "descri" in row_l:
+                score += 2
+            if "item" in row_l and ("código" in row_l or "codigo" in row_l):
+                score += 2
+            if "obra bancos" in row_l or "encargos sociais" in row_l:
+                score -= 5
+            if score > best_header_score and (
+                candidate.get("descricao", -1) != -1 or candidate.get("codigo", -1) != -1
+            ):
+                best_header_score = score
+                header_idx = idx
+                structure = candidate
+        # Cabeçalho fraco (ex.: linha de dados com "descrição" longa) não conta
+        if header_idx >= 0 and best_header_score < 5:
+            logger.info(
+                "📋 Cabeçalho fraco ignorado (score=%s) na linha %s",
+                best_header_score,
+                header_idx,
+            )
+            header_idx = -1
+            structure = {}
+        if header_idx >= 0:
+            logger.info(f"📋 Cabeçalho detectado na linha {header_idx}: {structure}")
+
+        # Continuação de Orçamento Sintético sem cabeçalho na página
+        if header_idx < 0 and self._looks_like_sintetico_continuation(rows):
+            synthetic_header = self._sintetico_header()
+            rows = [synthetic_header] + list(rows)
+            structure = self.identify_columns(synthetic_header)
+            header_idx = 0
+            logger.info("📋 Cabeçalho sintético injetado (continuação de página)")
         
         # 2. Se não encontrou cabeçalho, tenta adivinhar
         if header_idx == -1:
@@ -654,6 +867,8 @@ class BudgetParser:
                     if active_structure.get('bdi', -1) >= 0 and active_structure['bdi'] < len(row)
                     else 0.0
                 )
+                # BDI% inválido (>100) nunca entra no cálculo de total
+                bdi_for_total = bdi_raw if 0 < bdi_raw <= 100 else 0.0
                 valor_total_sem_bdi = (
                     self.parse_number(row[active_structure['valor_total_sem_bdi']])
                     if active_structure.get('valor_total_sem_bdi', -1) >= 0
@@ -667,19 +882,25 @@ class BudgetParser:
                 )
 
                 valor_total = self._resolve_valor_total(
-                    active_structure, row, quantidade, valor_unitario, bdi_raw
+                    active_structure, row, quantidade, valor_unitario, bdi_for_total
                 )
                 bdi = self._normalize_bdi_percent(
                     bdi_raw, quantidade, valor_unitario, valor_total, valor_total_sem_bdi
                 )
 
                 if bdi > 0 and valor_unitario > 0 and abs(valor_unitario - bdi) < 0.01:
-                    valor_unitario = 0.0
-                    valor_total = 0.0
+                    # Coluna BDI colidiu com VU — descartar BDI falso
+                    bdi = 0.0
 
-                novacap = self.try_parse_novacap_row(row) or self.try_parse_loose_text_row(row)
+                novacap = (
+                    self.try_parse_sintetico_row(row)
+                    or self.try_parse_novacap_row(row)
+                    or self.try_parse_loose_text_row(row)
+                )
                 if novacap:
+                    # Sintético/NOVACAP é fonte preferencial (evita código=descrição em grupos)
                     merged = self._merge_row_fields(
+                        novacap,
                         {
                             "item_numero": item_numero,
                             "item": item_numero,
@@ -692,7 +913,6 @@ class BudgetParser:
                             "valor_unitario": valor_unitario,
                             "valor_total": valor_total,
                         },
-                        novacap,
                     )
                     item_numero = str(merged.get("item_numero") or "")
                     banco = str(merged.get("banco") or "")

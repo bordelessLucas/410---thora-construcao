@@ -34,6 +34,8 @@ import {
   resolveStructuredItemPricing,
   sanitizeBdiPercent,
   isExecutiveItem,
+  getItemNumero,
+  resolveTipoLinha,
   snapshotReferenciaOrcamento,
   calcularEconomia,
 } from "../features/orcamentos/recalcularCurvaABC";
@@ -64,7 +66,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 type ItemOrcamento = OrcamentoItem;
 
 const EDITABLE_NUMERIC_CLASS =
-  "w-full rounded-md border border-slate-200/90 bg-slate-50 px-1.5 py-1 text-right text-sm font-medium tabular-nums transition hover:border-slate-300 hover:bg-slate-100 focus:border-blue-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-300 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none";
+  "box-border w-full rounded-md border border-slate-200/90 bg-slate-50 px-2 py-1.5 text-right text-sm font-medium tabular-nums transition hover:border-slate-300 hover:bg-slate-100 focus:border-blue-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-300 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none";
 
 interface TableRow {
   [key: string]: string | number;
@@ -137,7 +139,19 @@ const mapStructuredItemsToValidation = (
     const description = String(item.descricao ?? item.Descrição ?? "").trim();
     const itemNumero = String(item.item ?? item.item_numero ?? "").trim();
     const codigoCatalogo = String(item.codigo ?? item.Código ?? "").trim();
-    const tipo = String(item.tipo_linha ?? item.tipo ?? "item").toLowerCase();
+    const tipoHint = String(item.tipo_linha ?? item.tipo ?? "").toLowerCase();
+    const tipo = resolveTipoLinha({
+      tipo: tipoHint,
+      tipo_linha: tipoHint,
+      item: itemNumero,
+      item_numero: itemNumero,
+      codigo: codigoCatalogo,
+      catalogCode: codigoCatalogo,
+      descricao: description,
+      description,
+      valor_total: Number(item.valor_total_com_bdi ?? item.valor_total ?? 0),
+      valorTotalComBdi: Number(item.valor_total_com_bdi ?? item.valor_total ?? 0),
+    });
     if (tipo === "grupo" || description.toLowerCase().includes("total do grupo")) {
       continue;
     }
@@ -166,7 +180,7 @@ const mapStructuredItemsToValidation = (
     mapped.push({
       id: ++id,
       item: itemNumero,
-      tipo: String(item.tipo_linha ?? item.tipo ?? "item"),
+      tipo,
       banco: String(item.banco ?? ""),
       code: itemNumero || codigoCatalogo || String(id).padStart(3, "0"),
       catalogCode: codigoCatalogo || undefined,
@@ -332,6 +346,14 @@ export default function ValidacaoOrcamento() {
   const [selectAll, setSelectAll] = useState(false);
 
   const abcResumo = useMemo(() => calcularResumoAbc(items), [items]);
+  const executiveItemNumeros = useMemo(
+    () => items.map((item) => getItemNumero(item)).filter(Boolean),
+    [items],
+  );
+  const isExecutivo = useCallback(
+    (item: ItemOrcamento) => isExecutiveItem(item, executiveItemNumeros),
+    [executiveItemNumeros],
+  );
 
   const rawItemsParaAnalise = useMemo(() => {
     if (hierarchicalItems.length > 0) return hierarchicalItems;
@@ -341,7 +363,7 @@ export default function ValidacaoOrcamento() {
       item_numero: item.item,
       tipo: item.tipo,
       banco: item.banco,
-      codigo: item.catalogCode ?? item.code,
+      codigo: item.catalogCode ?? "",
       descricao: item.description,
       unidade: item.unit,
       quantidade: item.qty,
@@ -397,10 +419,10 @@ export default function ValidacaoOrcamento() {
   );
 
   const editalSemPrecos = useMemo(() => {
-    const executive = items.filter(isExecutiveItem);
+    const executive = items.filter(isExecutivo);
     if (executive.length === 0) return false;
     return executive.every((item) => item.unitPrice <= 0 && item.lineTotal <= 0);
-  }, [items]);
+  }, [items, isExecutivo]);
 
   const applyAbcToItems = (raw: ItemOrcamento[]) =>
     recalcularCurvaABC(raw.map(snapshotReferenciaOrcamento));
@@ -419,6 +441,33 @@ export default function ValidacaoOrcamento() {
       undefined,
     [flowState?.nomeProjeto, flowState?.filename, pdfFile?.name],
   );
+
+  const validacaoFinanceiraAlertas = useMemo(() => {
+    const resumo = flowState?.structuredData?.resumo as
+      | { validacao_financeira?: { alertas?: unknown; ok?: boolean } }
+      | undefined;
+    const vf = resumo?.validacao_financeira;
+    if (!vf) return [] as string[];
+    const alertas = Array.isArray(vf.alertas)
+      ? vf.alertas.filter((a): a is string => typeof a === "string" && a.trim().length > 0)
+      : [];
+    return alertas;
+  }, [flowState?.structuredData?.resumo]);
+
+  const estimativoMeta = useMemo(() => {
+    const resumo = flowState?.structuredData?.resumo as
+      | { estimativo_meta?: Record<string, unknown>; document_kind?: string }
+      | undefined;
+    const meta =
+      (resumo?.estimativo_meta as Record<string, unknown> | undefined) ||
+      ((flowState?.structuredData as { estimativo_meta?: Record<string, unknown> } | undefined)
+        ?.estimativo_meta);
+    if (!meta || typeof meta !== "object") return null;
+    if (resumo?.document_kind !== "estimativo_srp" && meta.document_kind !== "estimativo_srp") {
+      return null;
+    }
+    return meta;
+  }, [flowState?.structuredData]);
 
   useEffect(() => {
     if (!resolvedUploadId || items.length === 0) return;
@@ -791,6 +840,8 @@ export default function ValidacaoOrcamento() {
     });
   };
 
+  const formatMoneyFull = (value: number) => `R$ ${formatMoney(value)}`;
+
   // Handlers do PDF
   const onDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
     setNumPages(numPages);
@@ -814,7 +865,7 @@ export default function ValidacaoOrcamento() {
 
   const handleOpenCurvaAbc = () => {
     const selected = items.filter((item) => item.selected);
-    const payload = selected.length > 0 ? selected : items.filter(isExecutiveItem);
+    const payload = selected.length > 0 ? selected : items.filter(isExecutivo);
     if (payload.length === 0) {
       toast.warning("Nenhum item disponível", {
         description: "Processe o PDF ou adicione itens à planilha antes de abrir a Curva ABC.",
@@ -1201,60 +1252,134 @@ export default function ValidacaoOrcamento() {
             </div>
           </div>
 
+          {validacaoFinanceiraAlertas.length > 0 && (
+            <div className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-3 sm:px-6">
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">
+                Validação financeira
+              </p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4 text-sm text-amber-900">
+                {validacaoFinanceiraAlertas.map((alerta) => (
+                  <li key={alerta}>{alerta}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {estimativoMeta && (
+            <div className="shrink-0 border-b border-sky-200 bg-sky-50 px-4 py-3 sm:px-6">
+              <p className="text-xs font-semibold uppercase tracking-wide text-sky-900">
+                Orçamento estimativo / SRP
+              </p>
+              <div className="mt-2 grid grid-cols-1 gap-2 text-sm text-sky-950 sm:grid-cols-2 xl:grid-cols-4">
+                {typeof estimativoMeta.valor_anual_adotado === "number" && (
+                  <p>
+                    <span className="text-sky-700">Valor anual adotado: </span>
+                    <span className="font-semibold tabular-nums">
+                      {formatMoneyFull(estimativoMeta.valor_anual_adotado)}
+                    </span>
+                  </p>
+                )}
+                {typeof estimativoMeta.valor_anual_teto_ata === "number" && (
+                  <p>
+                    <span className="text-sky-700">Teto da ata: </span>
+                    <span className="font-semibold tabular-nums">
+                      {formatMoneyFull(estimativoMeta.valor_anual_teto_ata)}
+                    </span>
+                  </p>
+                )}
+                {typeof estimativoMeta.custo_m2_ponderado === "number" && (
+                  <p>
+                    <span className="text-sky-700">Custo ponderado: </span>
+                    <span className="font-semibold tabular-nums">
+                      {formatMoneyFull(estimativoMeta.custo_m2_ponderado)}/m²
+                    </span>
+                  </p>
+                )}
+                {typeof estimativoMeta.bdi_percentual === "number" && (
+                  <p>
+                    <span className="text-sky-700">BDI: </span>
+                    <span className="font-semibold tabular-nums">
+                      {String(estimativoMeta.bdi_percentual).replace(".", ",")}%
+                    </span>
+                  </p>
+                )}
+              </div>
+              <p className="mt-2 text-xs text-sky-800">
+                O Total Geral abaixo refere-se ao estudo de caso / planilha de serviços extraída
+                (ABC). O valor anual estimado é o teto contratual do documento.
+              </p>
+            </div>
+          )}
+
           {/* Mini dashboard Curva ABC */}
           {!isLoading && !loadError && items.length > 0 && (
-            <div className="shrink-0 border-b border-slate-100 bg-slate-50/50 px-6 py-4">
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
-                <div className="rounded-xl border border-blue-200 bg-white p-4 shadow-sm">
+            <div className="shrink-0 border-b border-slate-100 bg-slate-50/50 px-4 py-4 sm:px-6">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                <div className="min-w-0 rounded-xl border border-blue-200 bg-white p-4 shadow-sm">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                     Total geral (c/ BDI)
                   </p>
-                  <p className="mt-2 text-xl font-bold tabular-nums text-blue-700 transition-all duration-300">
-                    R$ {formatMoney(abcResumo.totalGeral)}
+                  <p
+                    className="mt-2 break-words text-base font-bold leading-snug tabular-nums text-blue-700 sm:text-lg"
+                    title={formatMoneyFull(abcResumo.totalGeral)}
+                  >
+                    {formatMoneyFull(abcResumo.totalGeral)}
                   </p>
                   <p className="mt-1 text-xs text-slate-400">
-                    {items.filter(isExecutiveItem).length} itens executivos
+                    {items.filter(isExecutivo).length} itens executivos
                   </p>
                 </div>
-                <div className="rounded-xl border border-red-200 bg-red-50/40 p-4 shadow-sm">
+                <div className="min-w-0 rounded-xl border border-red-200 bg-red-50/40 p-4 shadow-sm">
                   <p className="text-xs font-semibold uppercase tracking-wide text-red-800">
                     Classe A
                   </p>
-                  <p className="mt-2 text-lg font-bold tabular-nums text-red-900 transition-all duration-300">
+                  <p className="mt-2 text-lg font-bold tabular-nums text-red-900">
                     {abcResumo.classeA.count} itens
                   </p>
-                  <p className="mt-1 text-sm font-medium tabular-nums text-red-700">
-                    R$ {formatMoney(abcResumo.classeA.valor)}
+                  <p
+                    className="mt-1 break-words text-sm font-medium leading-snug tabular-nums text-red-700"
+                    title={formatMoneyFull(abcResumo.classeA.valor)}
+                  >
+                    {formatMoneyFull(abcResumo.classeA.valor)}
                   </p>
                 </div>
-                <div className="rounded-xl border border-yellow-200 bg-yellow-50/50 p-4 shadow-sm">
+                <div className="min-w-0 rounded-xl border border-yellow-200 bg-yellow-50/50 p-4 shadow-sm">
                   <p className="text-xs font-semibold uppercase tracking-wide text-yellow-900">
                     Classe B
                   </p>
-                  <p className="mt-2 text-lg font-bold tabular-nums text-yellow-900 transition-all duration-300">
+                  <p className="mt-2 text-lg font-bold tabular-nums text-yellow-900">
                     {abcResumo.classeB.count} itens
                   </p>
-                  <p className="mt-1 text-sm font-medium tabular-nums text-yellow-800">
-                    R$ {formatMoney(abcResumo.classeB.valor)}
+                  <p
+                    className="mt-1 break-words text-sm font-medium leading-snug tabular-nums text-yellow-800"
+                    title={formatMoneyFull(abcResumo.classeB.valor)}
+                  >
+                    {formatMoneyFull(abcResumo.classeB.valor)}
                   </p>
                 </div>
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 shadow-sm">
+                <div className="min-w-0 rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 shadow-sm">
                   <p className="text-xs font-semibold uppercase tracking-wide text-emerald-800">
                     Classe C
                   </p>
-                  <p className="mt-2 text-lg font-bold tabular-nums text-emerald-900 transition-all duration-300">
+                  <p className="mt-2 text-lg font-bold tabular-nums text-emerald-900">
                     {abcResumo.classeC.count} itens
                   </p>
-                  <p className="mt-1 text-sm font-medium tabular-nums text-emerald-700">
-                    R$ {formatMoney(abcResumo.classeC.valor)}
+                  <p
+                    className="mt-1 break-words text-sm font-medium leading-snug tabular-nums text-emerald-700"
+                    title={formatMoneyFull(abcResumo.classeC.valor)}
+                  >
+                    {formatMoneyFull(abcResumo.classeC.valor)}
                   </p>
                 </div>
-                <div className="rounded-xl border border-violet-200 bg-violet-50/40 p-4 shadow-sm">
+                <div className="min-w-0 rounded-xl border border-violet-200 bg-violet-50/40 p-4 shadow-sm sm:col-span-2 xl:col-span-1">
                   <p className="text-xs font-semibold uppercase tracking-wide text-violet-800">
                     Economia vs. edital
                   </p>
-                  <p className="mt-2 text-xl font-bold tabular-nums text-violet-900 transition-all duration-300">
-                    R$ {formatMoney(economiaTotal)}
+                  <p
+                    className="mt-2 break-words text-base font-bold leading-snug tabular-nums text-violet-900 sm:text-lg"
+                    title={formatMoneyFull(economiaTotal)}
+                  >
+                    {formatMoneyFull(economiaTotal)}
                   </p>
                   <p className="mt-1 text-xs text-violet-700">
                     Diferença quando o preço revisado é menor que o edital
@@ -1320,21 +1445,26 @@ export default function ValidacaoOrcamento() {
             </div>
           )}
 
-          {/* Corpo Tabela com Scroll Independente */}
+          {/* Corpo Tabela com Scroll Independente (vertical + horizontal) */}
           {!isLoading && !loadError && (
-            <div className="flex-1 overflow-auto pb-20">
+            <div className="relative min-h-0 flex-1">
+              <div className="absolute inset-0 overflow-auto overscroll-contain pb-16">
               {items.length === 0 ? (
-                <div className="flex items-center justify-center h-full text-slate-400">
+                <div className="flex h-full items-center justify-center text-slate-400">
                   <div className="text-center">
-                    <AlertCircle className="w-10 h-10 mx-auto mb-2 opacity-50" />
+                    <AlertCircle className="mx-auto mb-2 h-10 w-10 opacity-50" />
                     <p>Nenhum item foi extraído do PDF.</p>
                   </div>
                 </div>
               ) : (
-                <table className="min-w-[1200px] w-full border-collapse text-left text-sm">
+                <>
+                <p className="sticky left-0 top-0 z-30 border-b border-slate-100 bg-white/95 px-4 py-1.5 text-[11px] text-slate-500 backdrop-blur-sm sm:px-6">
+                  Role horizontalmente para ver todas as colunas (valores, totais e economia).
+                </p>
+                <table className="w-max min-w-[1680px] border-collapse text-left text-sm">
                   <thead className="border-b border-slate-200">
                     <tr>
-                      <th className="sticky top-0 z-20 w-10 bg-slate-50 px-2 py-3 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 w-10 bg-slate-50 px-2 py-3 shadow-[inset_0_-1px_0_#e2e8f0]">
                         <input
                           type="checkbox"
                           checked={selectAll}
@@ -1342,55 +1472,54 @@ export default function ValidacaoOrcamento() {
                           className="h-4 w-4 cursor-pointer rounded text-blue-600"
                         />
                       </th>
-                      <th className="sticky top-0 z-20 min-w-[6.5rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 w-[7.5rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
                         Cód. ref.
                       </th>
-                      <th className="sticky top-0 z-20 min-w-[5rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 w-[6.5rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
                         Banco
                       </th>
-                      <th className="sticky top-0 z-20 min-w-[4.5rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 w-[5.5rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
                         Tipo
                       </th>
-                      <th className="sticky top-0 z-20 w-12 whitespace-nowrap bg-slate-50 px-2 py-3 text-center text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 w-14 whitespace-nowrap bg-slate-50 px-2 py-3 text-center text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
                         ABC
                       </th>
-                      <th className="sticky top-0 z-20 w-24 whitespace-nowrap bg-slate-50 px-2 py-3 text-center text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 w-28 whitespace-nowrap bg-slate-50 px-2 py-3 text-center text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
                         Análise
                       </th>
-                      <th className="sticky top-0 z-20 min-w-[14rem] bg-slate-50 px-3 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 min-w-[16rem] bg-slate-50 px-3 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
                         Descrição
                       </th>
-                      <th className="sticky top-0 z-20 min-w-[4.5rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 w-[6rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
                         BDI (%)
                       </th>
-                      <th className="sticky top-0 z-20 w-14 whitespace-nowrap bg-slate-50 px-2 py-3 text-center text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 w-16 whitespace-nowrap bg-slate-50 px-2 py-3 text-center text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
                         Un.
                       </th>
-                      <th className="sticky top-0 z-20 min-w-[5rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 w-[8.5rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
                         Qtd.
                       </th>
-                      <th className="sticky top-0 z-20 min-w-[6.5rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 w-[10rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
                         V. unit. s/ BDI
                       </th>
-                      <th className="sticky top-0 z-20 min-w-[6.5rem] whitespace-nowrap bg-slate-100 px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 w-[11rem] whitespace-nowrap bg-slate-100 px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
                         Total c/ BDI
                       </th>
-                      <th className="sticky top-0 z-20 min-w-[5.5rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
+                      <th className="sticky top-8 z-20 w-[9rem] whitespace-nowrap bg-slate-50 px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-500 shadow-[inset_0_-1px_0_#e2e8f0]">
                         Economia
                       </th>
-                      <th className="sticky top-0 z-20 w-10 bg-slate-50 px-1 py-3 shadow-[inset_0_-1px_0_#e2e8f0]" />
+                      <th className="sticky top-8 z-20 w-10 bg-slate-50 px-1 py-3 shadow-[inset_0_-1px_0_#e2e8f0]" />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {items.map((item) => {
-                      const editable = isExecutiveItem(item);
+                      const editable = isExecutivo(item);
                       const analiseLinha = analisePorId.get(item.id);
                       const analiseMensagens = mensagensAnaliseLinha(analiseLinha);
                       const alertasCombinados = [
                         ...(item.extractionAlerts ?? []),
                         ...analiseMensagens,
                       ];
-                      // Determinar a cor de fundo com base na classificação ABC
                       let rowBgClass = "hover:bg-blue-50/30";
                       if (item.classification === "A") {
                         rowBgClass = "bg-red-50/30 hover:bg-red-50/50";
@@ -1404,8 +1533,8 @@ export default function ValidacaoOrcamento() {
                       <tr
                         key={item.id}
                         id={`orcamento-linha-${item.id}`}
-                        className={`transition group ${
-                          item.selected ? 'bg-blue-50/40' : rowBgClass
+                        className={`group transition ${
+                          item.selected ? "bg-blue-50/40" : rowBgClass
                         }`}
                       >
                         <td className="px-2 py-2 align-top">
@@ -1416,14 +1545,15 @@ export default function ValidacaoOrcamento() {
                             className="h-4 w-4 cursor-pointer rounded text-blue-600"
                           />
                         </td>
-                        <td className="min-w-[6.5rem] px-3 py-2 align-top">
+                        <td className="w-[7.5rem] px-3 py-2 align-top">
                           <input
                             type="text"
                             value={item.code}
                             onChange={(e) =>
                               handleChange(item.id, "code", e.target.value)
                             }
-                            className={`w-full min-w-[5.5rem] bg-transparent font-mono text-xs focus:outline-none border-b border-transparent focus:border-blue-500 ${
+                            title={item.code}
+                            className={`w-full bg-transparent font-mono text-xs focus:border-blue-500 focus:outline-none border-b border-transparent ${
                               item.classification === "A"
                                 ? "text-red-700"
                                 : item.classification === "B"
@@ -1435,14 +1565,15 @@ export default function ValidacaoOrcamento() {
                             placeholder="Ref. edital"
                           />
                         </td>
-                        <td className="min-w-[5rem] px-3 py-2 align-top">
+                        <td className="w-[6.5rem] px-3 py-2 align-top">
                           <input
                             type="text"
                             value={item.banco || ""}
                             onChange={(e) =>
                               handleChange(item.id, "banco", e.target.value)
                             }
-                            className={`w-full min-w-[4rem] bg-transparent font-mono text-xs focus:outline-none border-b border-transparent focus:border-blue-500 ${
+                            title={item.banco || undefined}
+                            className={`w-full bg-transparent font-mono text-xs focus:border-blue-500 focus:outline-none border-b border-transparent ${
                               item.classification === "A"
                                 ? "text-red-700"
                                 : item.classification === "B"
@@ -1454,13 +1585,13 @@ export default function ValidacaoOrcamento() {
                             placeholder="SINAPI"
                           />
                         </td>
-                        <td className="min-w-[4.5rem] px-3 py-2 align-top">
+                        <td className="w-[5.5rem] px-3 py-2 align-top">
                           <select
                             value={item.tipo || "item"}
                             onChange={(e) =>
                               handleChange(item.id, "tipo", e.target.value)
                             }
-                            className={`w-full min-w-[4rem] bg-transparent text-xs focus:outline-none border-b border-transparent focus:border-blue-500 ${
+                            className={`w-full bg-transparent text-xs focus:border-blue-500 focus:outline-none border-b border-transparent ${
                               item.classification === "A"
                                 ? "text-red-700"
                                 : item.classification === "B"
@@ -1474,7 +1605,7 @@ export default function ValidacaoOrcamento() {
                             <option value="grupo">Grupo</option>
                           </select>
                         </td>
-                        <td className="w-12 px-2 py-2 text-center align-top">
+                        <td className="w-14 px-2 py-2 text-center align-top">
                           {item.classification ? (
                             <span
                               className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ${
@@ -1492,10 +1623,10 @@ export default function ValidacaoOrcamento() {
                             <span className="text-slate-300">-</span>
                           )}
                         </td>
-                        <td className="w-24 px-2 py-2 text-center align-top">
+                        <td className="w-28 px-2 py-2 text-center align-top">
                           <AnaliseOrcamentoStatusBadge resultado={analiseLinha} compact />
                         </td>
-                        <td className="min-w-[14rem] max-w-none px-3 py-2 align-top">
+                        <td className="min-w-[16rem] max-w-[22rem] px-3 py-2 align-top">
                           <div className="flex items-start gap-1">
                             {alertasCombinados.length > 0 ? (
                               <span
@@ -1505,8 +1636,8 @@ export default function ValidacaoOrcamento() {
                                 <AlertCircle className="h-4 w-4" aria-hidden="true" />
                               </span>
                             ) : null}
-                            <input
-                              type="text"
+                            <textarea
+                              rows={2}
                               value={item.description}
                               onChange={(e) =>
                                 handleChange(
@@ -1515,7 +1646,8 @@ export default function ValidacaoOrcamento() {
                                   e.target.value,
                                 )
                               }
-                              className={`w-full min-w-[12rem] bg-transparent text-sm leading-snug focus:outline-none border-b border-transparent focus:border-blue-500 ${
+                              title={item.description}
+                              className={`min-h-[2.5rem] w-full resize-y bg-transparent text-sm leading-snug focus:border-blue-500 focus:outline-none border-b border-transparent ${
                                 alertasCombinados.length > 0
                                   ? "border-amber-200"
                                   : ""
@@ -1531,18 +1663,17 @@ export default function ValidacaoOrcamento() {
                             />
                           </div>
                         </td>
-                        <td className="min-w-[4.5rem] px-3 py-2 align-top">
+                        <td className="w-[6rem] px-3 py-2 align-top">
                           {editable ? (
                             <input
-                              type="number"
-                              step="0.01"
-                              min={0}
+                              type="text"
                               inputMode="decimal"
                               value={item.bdi}
                               onChange={(e) =>
                                 handleCellEdit(item.id, "bdi", e.target.value)
                               }
-                              className={`${EDITABLE_NUMERIC_CLASS} min-w-[4rem]`}
+                              title={String(item.bdi)}
+                              className={EDITABLE_NUMERIC_CLASS}
                               placeholder="0,00"
                               aria-label={`BDI percentual do item ${item.code}`}
                             />
@@ -1550,14 +1681,15 @@ export default function ValidacaoOrcamento() {
                             <span className="block text-right text-sm text-slate-400">—</span>
                           )}
                         </td>
-                        <td className="w-14 px-2 py-2 text-center align-top">
+                        <td className="w-16 px-2 py-2 text-center align-top">
                           <input
                             type="text"
                             value={item.unit}
                             onChange={(e) =>
                               handleChange(item.id, "unit", e.target.value)
                             }
-                            className={`w-full min-w-[2.5rem] text-center rounded text-xs font-medium focus:outline-none focus:ring-1 focus:ring-blue-500 py-1 ${
+                            title={item.unit}
+                            className={`w-full rounded px-1 py-1 text-center text-xs font-medium focus:outline-none focus:ring-1 focus:ring-blue-500 ${
                               item.classification === "A"
                                 ? "bg-red-100 text-red-800"
                                 : item.classification === "B"
@@ -1568,44 +1700,43 @@ export default function ValidacaoOrcamento() {
                             }`}
                           />
                         </td>
-                        <td className="min-w-[5rem] px-3 py-2 align-top">
+                        <td className="w-[8.5rem] px-3 py-2 align-top">
                           {editable ? (
                             <input
-                              type="number"
-                              step="any"
-                              min={0}
+                              type="text"
                               inputMode="decimal"
                               value={item.qty}
                               onChange={(e) =>
                                 handleCellEdit(item.id, "qty", e.target.value)
                               }
+                              title={String(item.qty)}
                               placeholder="0"
-                              className={`${EDITABLE_NUMERIC_CLASS} min-w-[4.5rem]`}
+                              className={EDITABLE_NUMERIC_CLASS}
                               aria-label={`Quantidade do item ${item.code}`}
                             />
                           ) : (
                             <span className="block text-right text-sm text-slate-400">—</span>
                           )}
                         </td>
-                        <td className="min-w-[6.5rem] px-3 py-2 align-top">
+                        <td className="w-[10rem] px-3 py-2 align-top">
                           {editable ? (
                             <input
-                              type="number"
-                              step="0.01"
-                              min={0}
+                              type="text"
                               inputMode="decimal"
                               value={item.unitPrice}
                               onChange={(e) =>
                                 handleCellEdit(item.id, "unitPrice", e.target.value)
                               }
-                              className={`${EDITABLE_NUMERIC_CLASS} min-w-[5.5rem]`}
+                              title={String(item.unitPrice)}
+                              className={EDITABLE_NUMERIC_CLASS}
                               aria-label={`Valor unitário s/ BDI do item ${item.code}`}
                             />
                           ) : (
                             <span className="block text-right text-sm text-slate-400">—</span>
                           )}
                         </td>
-                        <td className={`min-w-[6.5rem] whitespace-nowrap px-3 py-2 text-right align-top ${
+                        <td
+                          className={`w-[11rem] whitespace-nowrap px-3 py-2 text-right align-top ${
                           item.classification === "A"
                             ? "bg-red-100/50"
                             : item.classification === "B"
@@ -1613,8 +1744,10 @@ export default function ValidacaoOrcamento() {
                               : item.classification === "C"
                                 ? "bg-emerald-100/50"
                                 : "bg-slate-50/50"
-                        }`}>
-                          <span className={`text-sm font-bold ${
+                        }`}
+                        >
+                          <span
+                            className={`block text-sm font-bold tabular-nums ${
                             item.classification === "A"
                               ? "text-red-900"
                               : item.classification === "B"
@@ -1622,11 +1755,13 @@ export default function ValidacaoOrcamento() {
                                 : item.classification === "C"
                                   ? "text-emerald-900"
                                   : "text-slate-800"
-                          }`}>
-                            {formatMoney(item.lineTotal)}
+                          }`}
+                            title={formatMoneyFull(item.lineTotal)}
+                          >
+                            {formatMoneyFull(item.lineTotal)}
                           </span>
                         </td>
-                        <td className="min-w-[5.5rem] whitespace-nowrap px-3 py-2 text-right align-top">
+                        <td className="w-[9rem] whitespace-nowrap px-3 py-2 text-right align-top">
                           {(() => {
                             const economia = calcularEconomia(item);
                             if (economia <= 0) {
@@ -1639,11 +1774,11 @@ export default function ValidacaoOrcamento() {
                                 className="text-sm font-semibold tabular-nums text-violet-700"
                                 title={
                                   item.referenceLineTotal
-                                    ? `Ref. edital: ${formatMoney(item.referenceLineTotal)}`
+                                    ? `Ref. edital: ${formatMoneyFull(item.referenceLineTotal)}`
                                     : undefined
                                 }
                               >
-                                −{formatMoney(economia)}
+                                −{formatMoneyFull(economia)}
                               </span>
                             );
                           })()}
@@ -1659,11 +1794,13 @@ export default function ValidacaoOrcamento() {
                           </button>
                         </td>
                       </tr>
-                    );
+                      );
                     })}
                   </tbody>
                 </table>
+                </>
               )}
+              </div>
             </div>
           )}
         </div>

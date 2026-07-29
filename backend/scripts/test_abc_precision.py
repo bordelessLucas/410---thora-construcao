@@ -25,6 +25,10 @@ def test_parse_brl_formats():
     assert parse_brl("R$ 51.138,33") == 51138.33
     assert parse_brl(21.22) == 21.22
     assert parse_brl("") == 0.0
+    # Coeficientes SINAPI (muitas casas) — NÃO virar milhão
+    assert parse_brl("1,0000000") == 1.0
+    assert parse_brl("0,0006000") == 0.0006
+    assert abs(parse_brl("0,0034000") - 0.0034) < 1e-9
 
 
 def test_resolve_pricing_prefers_total_com_bdi():

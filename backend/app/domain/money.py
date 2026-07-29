@@ -47,12 +47,14 @@ def parse_brl(value: Any) -> float:
             # raro: 1,234.56
             text = text.replace(",", "")
     elif "," in text:
-        # 1234,56 ou 1,5
+        # Só vírgula: sempre decimal BR.
+        # Coeficientes SINAPI usam muitas casas (0,0006000 / 1,0000000).
+        # Nunca remover a vírgula (isso transformava 1,0000000 → 10_000_000).
         parts = text.split(",")
-        if len(parts) == 2 and len(parts[1]) <= 4:
-            text = text.replace(".", "").replace(",", ".")
+        if len(parts) == 2 and parts[1].isdigit():
+            text = f"{parts[0]}.{parts[1]}"
         else:
-            text = text.replace(",", "")
+            text = text.replace(",", ".")
     elif "." in text:
         parts = text.split(".")
         # 1.234.567 (só milhares)
@@ -163,8 +165,9 @@ def resolve_pricing_contract(
                 inferred = 0.0
                 err_as_sem_inf = 1.0
 
-            if err_as_com <= tolerance and err_as_com <= err_as_sem:
+            if (err_as_com <= tolerance and err_as_com <= err_as_sem):
                 vu_com = vu_raw
+                bdi = 0
                 alerts.append("VU interpretado como C/BDI (bate com total)")
             elif err_as_sem <= tolerance or err_as_sem_inf <= tolerance:
                 vu_sem = vu_raw

@@ -18,12 +18,13 @@ class ProcessTablesResponse(BaseModel):
     tables_found: int
     items_found: int
     analysis_types: list[str]
-    engine: str = "openai_hybrid"
+    engine: str = "budget_pipeline_5_engines"
     tables: list[dict[str, Any]] = Field(default_factory=list)
     items: list[dict[str, Any]] = Field(default_factory=list)
     structured_items: list[dict[str, Any]] = Field(default_factory=list)
     hierarchical_items: list[dict[str, Any]] = Field(default_factory=list)
     resumo: dict[str, Any] = Field(default_factory=dict)
     abc_summary: dict[str, Any] = Field(default_factory=dict)
+    validacao_financeira: dict[str, Any] = Field(default_factory=dict)
     ia_metadata: dict[str, Any] = Field(default_factory=dict)
     message: str = ""

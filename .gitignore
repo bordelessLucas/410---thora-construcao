@@ -4,3 +4,8 @@ backend/logs/
 
 # Local Netlify folder
 .netlify
+
+# build artifacts
+thora_construcao_vercel.egg-info/
+*.egg-info/
+firebase-debug.log

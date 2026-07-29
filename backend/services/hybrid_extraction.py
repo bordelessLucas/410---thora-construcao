@@ -192,13 +192,20 @@ def score_item_confidence(item: Dict[str, Any]) -> Tuple[float, List[str]]:
 def merge_parser_as_primary(
     parser_items: List[Dict[str, Any]],
     ai_items: List[Dict[str, Any]],
+    *,
+    prefer_parser_numerics: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Usa o parser local como base (lista completa) e enriquece com IA (descrição/preços).
     Ideal para editais com colunas de preço em branco.
+
+    prefer_parser_numerics: sintético/edital com VU já c/BDI — não deixa a IA
+    injetar BDI% do documento nem alterar totais (causa grupo+filho e reprovações).
     """
     if not parser_items:
         return ai_items
+
+    from app.domain.abc_curve import infer_tipo_linha, normalize_item_numero
 
     merged: List[Dict[str, Any]] = []
     for index, parser_item in enumerate(parser_items):
@@ -206,6 +213,12 @@ def merge_parser_as_primary(
             continue
 
         row = dict(parser_item)
+        # Sempre normaliza numeração (evita "1.2 DESCRIÇÃO" da IA)
+        num = normalize_item_numero(row.get("item_numero") or row.get("item") or "")
+        if num:
+            row["item_numero"] = num
+            row["item"] = num
+
         ai_match = _find_ai_match_for_parser(parser_item, ai_items, index)
 
         if ai_match:
@@ -214,23 +227,45 @@ def merge_parser_as_primary(
             if len(ai_desc) > len(parser_desc):
                 row["descricao"] = ai_desc
 
-            for field in _NUMERIC_FIELDS:
-                ai_val = _coerce_number(ai_match.get(field))
-                parser_val = _coerce_number(row.get(field))
-                if ai_val <= 0:
-                    continue
-                if parser_val <= 0 or _numeric_divergence(ai_val, parser_val):
-                    row[field] = ai_val
+            if not prefer_parser_numerics:
+                qty = _coerce_number(row.get("quantidade"))
+                vu = _coerce_number(row.get("valor_unitario"))
+                vt = _coerce_number(row.get("valor_total"))
+                prices_already_consistent = (
+                    qty > 0 and vu > 0 and vt > 0 and abs(qty * vu - vt) / max(vt, 1.0) <= 0.02
+                )
+
+                for field in _NUMERIC_FIELDS:
+                    ai_val = _coerce_number(ai_match.get(field))
+                    parser_val = _coerce_number(row.get(field))
+                    if ai_val <= 0:
+                        continue
+                    # Não injetar BDI do documento quando o total já bate com VU×Qtd
+                    if field == "bdi" and prices_already_consistent and parser_val <= 0:
+                        continue
+                    if parser_val <= 0 or _numeric_divergence(ai_val, parser_val):
+                        row[field] = ai_val
 
             ai_unidade = str(ai_match.get("unidade") or "").strip()
             if ai_unidade and str(row.get("unidade") or "").strip() in ("", "un"):
                 row["unidade"] = ai_unidade
 
+        # Tipagem determinística (não forçar "item" em grupos)
+        tipo = infer_tipo_linha(
+            descricao=str(row.get("descricao") or ""),
+            quantidade=_coerce_number(row.get("quantidade")),
+            valor_unitario=_coerce_number(row.get("valor_unitario")),
+            valor_total=_coerce_number(row.get("valor_total")),
+            codigo=str(row.get("codigo") or ""),
+            item_numero=str(row.get("item_numero") or row.get("item") or ""),
+            tipo_hint=str(row.get("tipo_linha") or row.get("tipo") or ""),
+        )
+        row["tipo_linha"] = tipo
+        row["tipo"] = tipo
+
         confianca, validation_alerts = score_item_confidence(row)
         row["confianca"] = confianca
         row["alertas"] = validation_alerts
-        row.setdefault("tipo_linha", "item")
-        row.setdefault("tipo", "item")
         row["origem_extracao"] = "parser_local_enriquecido_ia" if ai_match else "parser_local"
         merged.append(row)
 

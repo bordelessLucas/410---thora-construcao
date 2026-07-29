@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -176,8 +177,87 @@ def _collect_tables_from_finder(
             collected.append(entry)
 
 
+def _maybe_add_word_layout_table(
+    page: Any,
+    page_index: int,
+    collected: list[dict[str, Any]],
+    *,
+    force: bool = False,
+) -> None:
+    """
+    Pipeline por coordenadas (extract_words → Y → colunas X).
+
+    Entra quando find_tables está fraco, ou quando o layout por palavras
+    reconstrói melhor uma planilha com numeração hierárquica (sintético/edital).
+    """
+    from app.infrastructure.pdf.word_layout import extract_table_from_page_words
+    from services.budget_scoring import score_budget_table_likelihood
+
+    try:
+        entry = extract_table_from_page_words(page, page_index)
+    except Exception as exc:
+        logger.debug("word_layout falhou pág %s: %s", page_index + 1, exc)
+        return
+    if not entry:
+        return
+
+    rows = entry.get("rows") or []
+    wl_score = score_budget_table_likelihood(rows)
+    wl_nonempty = count_nonempty_rows(rows)
+    best_nonempty, best_score = _best_table_signal([t.get("rows") or [] for t in collected])
+
+    # Sinal de planilha orçamentária hierárquica (não composição unitária)
+    hier_items = 0
+    for row in rows[:40]:
+        if not row:
+            continue
+        first = str(row[0] or "").strip()
+        if re.match(r"^\d+\.\d+", first):
+            hier_items += 1
+    looks_like_budget_sheet = hier_items >= 4
+
+    # word_layout é para planilhas com numeração hierárquica (sintético/edital)
+    if not looks_like_budget_sheet:
+        return
+
+    better = wl_score > best_score + 15
+    weak_page = best_nonempty < 12 or best_score < 25
+    if not force and not better and not weak_page:
+        return
+
+    # Evita duplicar a mesma região; substitui se word_layout for melhor
+    for i, existing in enumerate(collected):
+        if _is_same_table_region(
+            rows,
+            entry.get("bbox"),
+            existing.get("rows") or [],
+            existing.get("bbox"),
+        ):
+            existing_score = score_budget_table_likelihood(existing.get("rows") or [])
+            if wl_score > existing_score:
+                collected[i] = entry
+                logger.info(
+                    "word_layout substituiu find_tables pág %s: %s→%s",
+                    page_index + 1,
+                    existing_score,
+                    wl_score,
+                )
+            return
+
+    collected.append(entry)
+    logger.info(
+        "word_layout pág %s: score=%s linhas=%s hier=%s (find_tables best=%s/%s)",
+        page_index + 1,
+        wl_score,
+        wl_nonempty,
+        hier_items,
+        best_score,
+        best_nonempty,
+    )
+
+
 def extract_page_tables_with_bbox(page: Any, page_index: int) -> list[dict[str, Any]]:
-    """Extrai tabelas com bbox via pdfplumber find_tables (para recorte de thumbnail)."""
+    """Extrai tabelas com bbox via pdfplumber find_tables + fallback por coordenadas."""
     collected: list[dict[str, Any]] = []
 
     default_found = page.find_tables() or []
@@ -199,6 +279,14 @@ def extract_page_tables_with_bbox(page: Any, page_index: int) -> list[dict[str, 
             _collect_tables_from_finder(text_found, collected, page_index)
         except Exception as exc:
             logger.debug("find_tables text falhou: %s", exc)
+
+    # Etapas 1–8: reconstrução espacial por palavras (genérico, sem OCR)
+    _maybe_add_word_layout_table(
+        page,
+        page_index,
+        collected,
+        force=needs_fallback or not collected,
+    )
 
     if not collected:
         text = page.extract_text()

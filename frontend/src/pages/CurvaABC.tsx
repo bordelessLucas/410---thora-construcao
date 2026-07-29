@@ -108,8 +108,14 @@ const CurvaABC: React.FC = () => {
         ? valorTotalExplicit
         : quantidade * valorUnitario * (1 + bdi / 100);
 
-    // Quarentena / inelegível: zera para não entrar no Pareto local
-    if (raw.quarentena === true || raw.abc_elegivel === false) {
+    const ineligible =
+      raw.quarentena === true ||
+      raw.abc_elegivel === false ||
+      String((raw as { tipo_linha?: string; tipo?: string }).tipo_linha ?? (raw as { tipo?: string }).tipo ?? "")
+        .toLowerCase() === "grupo";
+
+    // Quarentena / inelegível / grupo: zera para não entrar no Pareto local
+    if (ineligible || valorTotal <= 0) {
       return {
         id: String(raw.id ?? index + 1),
         descricao: String(raw.descricao ?? raw.description ?? "").trim(),
@@ -143,7 +149,9 @@ const CurvaABC: React.FC = () => {
    * inclusive o que cruza o corte — evita classificar um único item dominante como C).
    */
   const classifyItemsABC = (baseItems: Item[]): Item[] => {
-    const sortedItems = [...baseItems].sort((a, b) => {
+    // Só linhas com valor (grupos/quarentena já vieram zerados)
+    const eligible = baseItems.filter((item) => item.valor_total > 0);
+    const sortedItems = [...eligible].sort((a, b) => {
       const diff = b.valor_total - a.valor_total;
       if (diff !== 0) return diff;
       return String(a.id).localeCompare(String(b.id), "pt-BR");

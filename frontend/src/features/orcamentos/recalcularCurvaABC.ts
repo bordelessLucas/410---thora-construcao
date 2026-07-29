@@ -43,6 +43,20 @@ export interface OrcamentoItem {
   abcEligible?: boolean;
 }
 
+export function getItemNumero(item: {
+  item?: string;
+  item_numero?: string;
+  code?: string;
+}): string {
+  const fromItem = String(item.item_numero ?? item.item ?? "").trim();
+  const matchItem = fromItem.match(/^(\d+(?:\.\d+)*)/);
+  if (matchItem) return matchItem[1];
+  const fromCode = String(item.code ?? "").trim();
+  // `code` no front às vezes guarda o nº do item (1.2.1); só use se parecer hierarquia
+  if (/^\d+(?:\.\d+)+$/.test(fromCode)) return fromCode;
+  return fromItem;
+}
+
 export function resolveTipoLinha(item: {
   tipo?: string;
   tipo_linha?: string;
@@ -50,31 +64,100 @@ export function resolveTipoLinha(item: {
   item_numero?: string;
   quantidade?: number;
   valor_total?: number;
+  valorTotalComBdi?: number;
+  lineTotal?: number;
   codigo?: string;
+  catalogCode?: string;
+  code?: string;
+  descricao?: string;
+  description?: string;
 }): "grupo" | "item" | "composicao" {
-  const tipo = String(item.tipo_linha ?? item.tipo ?? "item").toLowerCase();
-  const itemNumero = String(item.item_numero ?? item.item ?? "").trim();
+  const tipo = String(item.tipo_linha ?? item.tipo ?? "").toLowerCase();
+  const itemNumero = getItemNumero(item);
+  const descricao = String(item.descricao ?? item.description ?? "");
+  // catalogCode = código do serviço; `code` no front às vezes é o nº do item — não usar como código
+  const codigo = String(item.codigo ?? item.catalogCode ?? "").trim();
   const isXyz = /^\d+\.\d+\.\d+/.test(itemNumero);
+  const isGroupNum = /^\d+(?:\.\d+)?$/.test(itemNumero) && !isXyz;
+  const codigoSeemsCatalog =
+    Boolean(codigo) &&
+    codigo !== itemNumero &&
+    codigo.length <= 40 &&
+    !(codigo.includes(" ") && codigo.length > 20);
+  // NOVACAP/sintético: código+banco frequentemente vêm na descrição ("106137 SINAPI …")
+  const hasCatalogInDescription =
+    /\b(SINAPI|SICRO3?|ORSE|TCPO|SEINFRA|SIURB|EMOP|CDHU|DNIT|ANP|Pr[oó]prio|PR[OÓ]PRIA)\b/i.test(
+      descricao,
+    ) || /^\s*\d{5,}\b/.test(descricao.trim());
+  const total = Number(item.valorTotalComBdi ?? item.lineTotal ?? item.valor_total ?? 0);
+  const looksPricedLeaf =
+    hasCatalogInDescription && total > 0 && !/^GRUPO\b/i.test(descricao.trim());
+
+  // X ou X.Y sem código de catálogo real = cabeçalho de grupo (sintético)
+  // Exceto quando a descrição já carrega código/banco de serviço precificado.
+  if (isGroupNum && !codigoSeemsCatalog && !looksPricedLeaf) {
+    return "grupo";
+  }
 
   // NOVACAP: X.Y.Z com financeiro nunca é composição
   if (isXyz && tipo === "composicao") {
     return "item";
   }
   if (tipo === "grupo" || tipo === "titulo" || tipo === "título" || tipo === "title") {
-    return "grupo";
+    if (!codigoSeemsCatalog && !looksPricedLeaf) return "grupo";
   }
   if (tipo === "composicao" || tipo === "composição" || tipo === "insumo" || tipo === "subitem") {
-    return "composicao";
+    if (!isXyz) return "composicao";
   }
-  return "item";
+  // Folha executiva: X.Y.Z ou X.Y com código de catálogo (4.1, 7.1…)
+  if (isXyz || (isGroupNum && (codigoSeemsCatalog || looksPricedLeaf))) {
+    return "item";
+  }
+  if (isGroupNum) {
+    return "grupo";
+  }
+  return tipo === "composicao" ? "composicao" : "item";
 }
 
-export function isExecutiveItem(item: OrcamentoItem): boolean {
+/** True se nenhum outro item da lista é filho hierárquico (item.). */
+export function isHierarchyLeaf(
+  itemNumero: string,
+  allItemNumeros: Iterable<string>,
+): boolean {
+  const n = String(itemNumero || "").trim();
+  if (!n) return true;
+  const prefix = `${n}.`;
+  for (const other of allItemNumeros) {
+    if (String(other).startsWith(prefix)) return false;
+  }
+  return true;
+}
+
+export function isExecutiveItem(
+  item: OrcamentoItem,
+  allItemNumeros?: Iterable<string>,
+): boolean {
   const tipo = resolveTipoLinha(item);
   const desc = item.description.toLowerCase();
   if (tipo !== "item" || desc.includes("total do grupo")) return false;
   if (item.quarantine === true || item.abcEligible === false) return false;
-  return (item.lineTotal ?? 0) > 0 || (item.valorTotalComBdi ?? 0) > 0;
+  if ((item.lineTotal ?? 0) <= 0 && (item.valorTotalComBdi ?? 0) <= 0) return false;
+  // Evita somar grupo + filhos (ex.: 1.2 + 1.2.1), mas mantém serviço
+  // precificado mesmo com filho fantasma por numeração inconsistente no PDF.
+  const numeros = allItemNumeros ?? [];
+  const num = getItemNumero(item);
+  if (num && !isHierarchyLeaf(num, numeros)) {
+    const qty = Number(item.qty) || 0;
+    const vu =
+      Number(item.valorUnitarioComBdi) ||
+      Number(item.unitPrice) ||
+      0;
+    const total = Number(item.valorTotalComBdi ?? item.lineTotal) || 0;
+    const codigo = String(item.catalogCode ?? "").trim();
+    const priced = qty > 0 && vu > 0 && (Boolean(codigo) || Math.abs(vu - total) > 0.02);
+    if (!priced) return false;
+  }
+  return true;
 }
 
 /** @deprecated Prefer parseBrl — mantido como alias. */
@@ -203,6 +286,7 @@ export function resolveStructuredItemPricing(
 
       if (errAsCom <= tolerance && errAsCom <= errAsSem) {
         vuCom = vuRaw;
+        bdi = 0;
         alerts.push("VU interpretado como C/BDI (bate com total)");
       } else if (errAsSem <= tolerance || errAsSemInf <= tolerance) {
         vuSem = vuRaw;
@@ -284,8 +368,12 @@ export function recalcularCurvaABC(items: OrcamentoItem[]): OrcamentoItem[] {
     };
   });
 
-  const groups = withTotals.filter((item) => !isExecutiveItem(item));
-  const executives = withTotals.filter(isExecutiveItem);
+  const allNumeros = withTotals
+    .map((item) => getItemNumero(item))
+    .filter(Boolean);
+
+  const groups = withTotals.filter((item) => !isExecutiveItem(item, allNumeros));
+  const executives = withTotals.filter((item) => isExecutiveItem(item, allNumeros));
 
   const sorted = [...executives].sort((a, b) => {
     const diff = b.lineTotal - a.lineTotal;
@@ -339,7 +427,8 @@ export interface AbcResumo {
 }
 
 export function calcularResumoAbc(items: OrcamentoItem[]): AbcResumo {
-  const executives = items.filter(isExecutiveItem);
+  const allNumeros = items.map((item) => getItemNumero(item)).filter(Boolean);
+  const executives = items.filter((item) => isExecutiveItem(item, allNumeros));
   const totalGeral = executives.reduce((acc, item) => acc + item.lineTotal, 0);
   const quarantineCount = items.filter((i) => i.quarantine).length;
 

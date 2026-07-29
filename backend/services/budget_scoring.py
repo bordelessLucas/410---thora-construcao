@@ -195,11 +195,28 @@ def score_budget_table_likelihood(rows: List[List[Any]]) -> int:
     has_qtd = any(any(k in str(c).lower() for k in _BUDGET_HEADER_HINTS["quantidade"]) for row in header_rows for c in row if c)
     has_val = any(any(k in str(c).lower() for k in _BUDGET_HEADER_HINTS["valor"]) for row in header_rows for c in row if c)
 
+    # Continuação de Orçamento Sintético (sem cabeçalho na página):
+    # linhas X.Y.Z + código + valores + peso%
+    xyz_rows = 0
+    peso_rows = 0
+    for row in rows[:25]:
+        cells = [str(c).strip() for c in row if str(c).strip()]
+        if not cells:
+            continue
+        if re.match(r"^\d+\.\d+\.\d+", cells[0]):
+            xyz_rows += 1
+        if any("%" in c and len(c) < 16 for c in cells[-3:]):
+            peso_rows += 1
+    is_sintetico_continuation = xyz_rows >= 5 and peso_rows >= 5
+
     # Enforce presence of the three classical engineering columns
-    if not (has_codigo and has_qtd and has_val):
+    # (exceto continuação de sintético, que herda o cabeçalho da página anterior)
+    if not (has_codigo and has_qtd and has_val) and not is_sintetico_continuation:
         return 0
 
     score = 0
+    if is_sintetico_continuation:
+        score += 140  # Prioriza frente a composições na seleção automática
     sample_parts: list[str] = []
     for row in rows[:15]:
         sample_parts.append(" ".join(str(c).lower() for c in row if c))
@@ -241,7 +258,10 @@ def score_budget_table_likelihood(rows: List[List[Any]]) -> int:
 
     if "orçamento" in sample_text or "orcamento" in sample_text:
         score += 8
+    if "sintético" in sample_text or "sintetico" in sample_text:
+        score += 40
     if "composição" in sample_text or "composicao" in sample_text:
+        # Composição detalhada não deve ganhar da planilha sintética
         score += 6
 
     return score

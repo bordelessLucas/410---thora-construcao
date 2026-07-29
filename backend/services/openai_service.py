@@ -977,7 +977,12 @@ async def process_selected_table(
     user_id: str | None = None,
 ) -> Tuple[Dict[str, Any], str]:
     """
-    Processa a tabela escolhida com IA (OpenAI ou Gemini) e retorna JSON estruturado.
+    LEGADO — não usar no path principal.
+
+    A extração de itens passou para `app.domain.budget_pipeline.run_pipeline`
+    (5 engines determinísticos). OpenAI/Gemini vision aqui só permanece para
+    `_legacy_main` e experimentos; insights textual usam
+    `budget_pipeline.insights_openai` sobre JSON já validado.
     """
     provider = _resolve_extraction_provider()
     t0 = time.perf_counter()
