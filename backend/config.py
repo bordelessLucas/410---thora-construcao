@@ -52,6 +52,8 @@ FRONTEND_URLS = [
     "http://127.0.0.1:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:8001",
+    "https://borderless-5a4c8.web.app",
+    "https://borderless-5a4c8.firebaseapp.com",
     "https://410-thora.netlify.app",
     "https://borderles-410.netlify.app",
     "https://borderless-410-thora.netlify.app",
@@ -60,10 +62,10 @@ FRONTEND_URLS = [
 ]
 FRONTEND_URLS = [url for url in FRONTEND_URLS if url]
 
-# Permite previews e novos sites Netlify sem redeploy do backend (ex.: *.netlify.app)
+# Netlify + Firebase Hosting (web.app / firebaseapp.com)
 CORS_ORIGIN_REGEX = os.getenv(
     "CORS_ORIGIN_REGEX",
-    r"https://[\w-]+\.netlify\.app",
+    r"https://[\w-]+\.(netlify\.app|web\.app|firebaseapp\.com)",
 )
 
 # Server

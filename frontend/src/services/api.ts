@@ -15,11 +15,10 @@ import {
 
 // Detectar URL da API
 // Prioridade:
-// 1) Em produção no Vercel fullstack: mesma origem
-// 2) VITE_API_URL (quando definido)
-// 3) Em dev com app servido pelo backend em 8000: mesma origem
-// 4) Em dev com Vite: proxy/local backend
-// 5) Em produção: mesma origem
+// 1) Dev local (Vite proxy)
+// 2) VITE_API_URL — obrigatório em Firebase Hosting / Netlify (Cloud Run direto;
+//    Hosting→Cloud Run tem timeout de 60s e quebra PDF/IA longos)
+// 3) Fallbacks de hosts fullstack legados
 const getAPIBase = () => {
   const isLocalhost = ["localhost", "127.0.0.1"].includes(
     window.location.hostname,
@@ -28,20 +27,29 @@ const getAPIBase = () => {
     window.location.hostname.endsWith(".vercel.app") ||
     window.location.hostname === "thora-construcao.vercel.app";
   const isRenderHost = window.location.hostname.endsWith(".onrender.com");
+  const isFirebaseHosting =
+    window.location.hostname.endsWith(".web.app") ||
+    window.location.hostname.endsWith(".firebaseapp.com");
 
   // Dev local: mesma origem do Vite → proxy encaminha /api e /health ao backend (8001).
   if (import.meta.env.DEV && isLocalhost) {
     return window.location.origin;
   }
 
-  // VITE_API_URL explícito (ex.: Render) — necessário para operações longas (>30s).
+  // Cloud Run (ou outro backend remoto) — necessário para jobs > 60s.
   if (import.meta.env.VITE_API_URL) {
-    return import.meta.env.VITE_API_URL;
+    return String(import.meta.env.VITE_API_URL).replace(/\/$/, "");
   }
 
-  // Em deploy fullstack, API e frontend ficam no mesmo domínio.
   if (!import.meta.env.DEV && (isVercelHost || isRenderHost)) {
     return window.location.origin;
+  }
+
+  // Firebase Hosting sem VITE_API_URL = misconfig (não proxiar pela Hosting).
+  if (!import.meta.env.DEV && isFirebaseHosting) {
+    console.error(
+      "VITE_API_URL ausente no build do Firebase Hosting. Rebuild com a URL do Cloud Run.",
+    );
   }
 
   if (isLocalhost) {
@@ -63,7 +71,7 @@ console.info(`🌐 API Base: ${API_BASE}`);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Acorda o Render sem depender de CORS (GET simples via Image). */
+/** Ping leve em /health (não depende de CORS no body). */
 export const wakeApiServer = (): void => {
   const base = API_BASE.replace(/\/$/, "");
   const img = new Image();
@@ -76,28 +84,33 @@ const isHealthRequest = (url?: string): boolean => {
   return url === "/health" || url.endsWith("/health") || url.includes("/health?");
 };
 
-const isRenderColdStartError = (error: unknown): boolean => {
+/** 502/503/504/429 ou falha de rede — API saturada, reiniciando ou indisponível. */
+const isApiTransientError = (error: unknown): boolean => {
   const err = error as {
     response?: { status?: number };
     code?: string;
     message?: string;
   };
   const status = err.response?.status;
-  if (status === 502 || status === 503 || status === 504) return true;
+  if (status === 429 || status === 502 || status === 503 || status === 504) return true;
   const message = err.message ?? "";
   if (
     !err.response &&
     (err.code === "ERR_NETWORK" ||
       message.includes("Network Error") ||
       message.includes("ERR_FAILED") ||
-      message.includes("502"))
+      message.includes("502") ||
+      message.includes("429"))
   ) {
     return true;
   }
   return false;
 };
 
-/** Acorda o backend no Render (free tier dorme após inatividade). */
+/** @deprecated use isApiTransientError */
+const isRenderColdStartError = isApiTransientError;
+
+/** Espera a API Cloud Run responder /health. */
 export const pingApiHealth = async (maxAttempts = 6): Promise<boolean> => {
   wakeApiServer();
   await sleep(2000);
@@ -117,7 +130,7 @@ export const pingApiHealth = async (maxAttempts = 6): Promise<boolean> => {
         return true;
       }
     } catch {
-      /* Render ainda subindo — 502 sem CORS é normal durante cold start */
+      /* API ainda indisponível / saturada */
     }
     if (attempt < maxAttempts) {
       await sleep(Math.min(2500 + attempt * 1500, 8000));
@@ -133,9 +146,9 @@ export const ensureApiReady = async (): Promise<void> => {
   if (isReady) return;
 
   throw new Error(
-    "Servidor da API ainda está iniciando (Render free tier dorme após ~15 min). " +
+    "A API (Cloud Run) ainda não respondeu. " +
       `Aguarde cerca de 1 minuto, abra ${API_BASE.replace(/\/$/, "")}/health no navegador ` +
-      "até ver status online e tente novamente.",
+      'até ver {"status":"ok"} e tente novamente.',
   );
 };
 
@@ -179,11 +192,18 @@ const parseApiError = (error: unknown, fallback: string): string => {
   const detail = err.response?.data?.detail;
   const formatted = formatApiDetail(detail, "");
   if (formatted) return formatted;
-  if (isRenderColdStartError(error)) {
+  if (isApiTransientError(error)) {
+    const status = (error as { response?: { status?: number } }).response?.status;
+    if (status === 429) {
+      return (
+        "API temporariamente saturada (muitas requisições). " +
+        "Aguarde 15–30 segundos e tente novamente — estamos no Cloud Run, não no Render."
+      );
+    }
     return (
-      "Servidor da API no Render está acordando ou indisponível (502/503). " +
+      "API (Cloud Run) indisponível ou reiniciando (502/503). " +
       "Aguarde 30–60 segundos e tente novamente. " +
-      `Se persistir, abra ${API_BASE.replace(/\/$/, "")}/health até ver \"online\".`
+      `Se persistir, abra ${API_BASE.replace(/\/$/, "")}/health até ver {"status":"ok"}.`
     );
   }
   return fallback;
@@ -222,7 +242,7 @@ type RetryAxiosConfig = typeof apiClient extends { request: infer R } ? Paramete
   __skipColdStartRetry?: boolean;
 } : never;
 
-// Retry automático quando o Render está acordando (502/503 sem header CORS).
+// Retry automático quando a API (Cloud Run) está saturada/reiniciando.
 apiClient.interceptors.response.use(
   (response) => response,
   async (error: unknown) => {
@@ -456,7 +476,7 @@ export const getOrcamentoTableCandidates = async (
 
 /**
  * Detecta tabelas de forma assíncrona (job + polling).
- * Reenvia o PDF no start — necessário no Render Free (disco efêmero).
+ * Reenvia o PDF no start — necessário no Cloud Run (disco efêmero entre instâncias).
  * Cada poll também acorda o backend (evita sleep durante a detecção).
  */
 export const detectOrcamentoTables = async (
@@ -483,14 +503,17 @@ export const detectOrcamentoTables = async (
   );
   const started = Date.now();
 
-  // Mantém a API aquecida o tempo todo enquanto a detecção roda (PDF grande).
-  const keepWarmId = window.setInterval(() => {
-    wakeApiServer();
-  }, 15_000);
-  wakeApiServer();
+  // Keep-warm só faz sentido em backends que dormem (Render). No Cloud Run satura e gera 429.
+  const needsKeepWarm = /\.onrender\.com/i.test(API_BASE);
+  const keepWarmId = needsKeepWarm
+    ? window.setInterval(() => {
+        wakeApiServer();
+      }, 60_000)
+    : null;
+  if (needsKeepWarm) wakeApiServer();
 
   const stopKeepWarm = () => {
-    window.clearInterval(keepWarmId);
+    if (keepWarmId != null) window.clearInterval(keepWarmId);
   };
 
   let startData: OrcamentoTableDetectResponse;

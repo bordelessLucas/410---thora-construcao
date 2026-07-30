@@ -166,6 +166,12 @@ class UploadStore:
         meta = self.load_meta(upload_id)
         owner = meta.get("userId")
         if not owner:
-            return
-        if str(owner) != str(user_id):
+            # Disco efêmero / outra instância: tenta restaurar PDF+meta do Storage.
+            try:
+                self.ensure_pdf(upload_id, user_id=user_id)
+                meta = self.load_meta(upload_id)
+                owner = meta.get("userId")
+            except HTTPException:
+                return
+        if owner and str(owner) != str(user_id):
             raise HTTPException(status_code=403, detail="Acesso negado")

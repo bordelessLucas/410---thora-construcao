@@ -10,12 +10,13 @@ MEMORY="${CLOUD_RUN_MEMORY:-2Gi}"
 CPU="${CLOUD_RUN_CPU:-1}"
 TIMEOUT="${CLOUD_RUN_TIMEOUT:-900}"
 MIN_INSTANCES="${CLOUD_RUN_MIN_INSTANCES:-1}"
-MAX_INSTANCES="${CLOUD_RUN_MAX_INSTANCES:-3}"
+MAX_INSTANCES="${CLOUD_RUN_MAX_INSTANCES:-1}"
 
-export PATH="${HOME}/google-cloud-sdk/bin:${PATH}"
+export PATH="${ROOT}/.tools/google-cloud-sdk/bin:${HOME}/google-cloud-sdk/bin:${PATH}"
 
 if ! command -v gcloud >/dev/null 2>&1; then
-  echo "gcloud não encontrado. Instale: https://cloud.google.com/sdk/docs/install"
+  echo "gcloud não encontrado. Esperado em ${ROOT}/.tools/google-cloud-sdk/bin"
+  echo "Ou: brew install --cask google-cloud-sdk"
   exit 1
 fi
 
@@ -30,7 +31,7 @@ gcloud services enable \
   secretmanager.googleapis.com \
   --project="${PROJECT_ID}"
 
-FRONTEND_URLS_DEFAULT="https://410-thora-construcaob.netlify.app,https://410-thora.netlify.app,https://borderless-410-thora.netlify.app"
+FRONTEND_URLS_DEFAULT="https://borderless-5a4c8.web.app,https://borderless-5a4c8.firebaseapp.com,https://410-thora-construcaob.netlify.app,https://410-thora.netlify.app,https://borderless-410-thora.netlify.app"
 
 ENV_FILE="${ROOT}/backend/cloudrun.env.yaml"
 
@@ -52,7 +53,7 @@ gcloud run deploy "${SERVICE}" \
   --memory="${MEMORY}" \
   --cpu="${CPU}" \
   --timeout="${TIMEOUT}" \
-  --concurrency=10 \
+  --concurrency=40 \
   --min-instances="${MIN_INSTANCES}" \
   --max-instances="${MAX_INSTANCES}" \
   --no-cpu-throttling \
@@ -67,5 +68,5 @@ URL=$(gcloud run services describe "${SERVICE}" \
 
 echo ""
 echo "==> Cloud Run URL: ${URL}"
-echo "==> Atualize Netlify VITE_API_URL e netlify.toml com essa URL."
+echo "==> Frontend: Firebase Hosting (https://${PROJECT_ID}.web.app) com VITE_API_URL=${URL}"
 echo "==> Teste: curl -s ${URL}/health"

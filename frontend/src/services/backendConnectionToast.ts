@@ -37,9 +37,9 @@ function showStatus(status: BackendStatus): void {
   currentStatus = status;
 
   if (status === "waking") {
-    toast.loading("Backend acordando...", {
+    toast.loading("Conectando à API...", {
       id: TOAST_ID,
-      description: "Aguarde — o servidor no Render está iniciando.",
+      description: "Aguardando resposta do Cloud Run.",
       duration: Infinity,
       closeButton: false,
     });

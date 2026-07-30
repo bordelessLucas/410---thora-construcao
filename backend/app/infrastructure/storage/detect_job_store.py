@@ -7,9 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.config import DETECT_JOB_STALE_SECONDS, JOBS_DIR
+from app.config import DETECT_JOB_STALE_SECONDS, IS_CLOUD, JOBS_DIR
 
 logger = logging.getLogger(__name__)
+
+FIRESTORE_COLLECTION = "detect_jobs"
+# Firestore doc limit ~1 MiB — result com muitas preview_rows pode estourar.
+_MAX_RESULT_JSON_BYTES = 700_000
 
 
 def _utcnow() -> str:
@@ -25,8 +29,45 @@ def _parse_iso(value: str | None) -> datetime | None:
         return None
 
 
+def _firestore_db():
+    if not IS_CLOUD:
+        return None
+    try:
+        from firebase_service import db as firestore_db
+
+        return firestore_db
+    except Exception as exc:
+        logger.debug("[detect-job] Firestore indisponível: %s", exc)
+        return None
+
+
+def _json_safe(value: Any) -> Any:
+    """Garante tipos aceitos pelo Firestore (via round-trip JSON)."""
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _cloud_payload(job: dict[str, Any]) -> dict[str, Any]:
+    payload = _json_safe(job)
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return payload
+    raw = json.dumps(result, ensure_ascii=False)
+    if len(raw.encode("utf-8")) <= _MAX_RESULT_JSON_BYTES:
+        return payload
+    # Mantém metadados; opções completas ficam no TableCacheStore (Storage).
+    payload["result"] = {
+        "tables_found": int(result.get("tables_found") or 0),
+        "mock_fallback": bool(result.get("mock_fallback")),
+        "cached": bool(result.get("cached")),
+        "recommended_table_ids": list(result.get("recommended_table_ids") or []),
+        "options": [],
+        "options_in_cache": True,
+    }
+    return payload
+
+
 class DetectJobStore:
-    """Status de detecção de tabelas (memória + disco em /tmp para o mesmo worker)."""
+    """Status de detecção: memória + disco; em Cloud Run também Firestore (multi-instância)."""
 
     def __init__(self, base_dir: Path | None = None) -> None:
         self._base_dir = base_dir or JOBS_DIR
@@ -37,7 +78,7 @@ class DetectJobStore:
     def _path(self, upload_id: str) -> Path:
         return self._base_dir / f"{upload_id}_detect_job.json"
 
-    def _persist(self, job: dict[str, Any]) -> None:
+    def _persist_disk(self, job: dict[str, Any]) -> None:
         upload_id = str(job.get("upload_id") or "")
         if not upload_id:
             return
@@ -47,7 +88,26 @@ class DetectJobStore:
                 encoding="utf-8",
             )
         except OSError as exc:
-            logger.warning("[detect-job] falha ao persistir %s: %s", upload_id, exc)
+            logger.warning("[detect-job] falha ao persistir disco %s: %s", upload_id, exc)
+
+    def _persist_firestore(self, job: dict[str, Any]) -> None:
+        upload_id = str(job.get("upload_id") or "")
+        if not upload_id:
+            return
+        db = _firestore_db()
+        if not db:
+            return
+        try:
+            db.collection(FIRESTORE_COLLECTION).document(upload_id).set(
+                _cloud_payload(job),
+                merge=True,
+            )
+        except Exception as exc:
+            logger.warning("[detect-job] falha Firestore %s: %s", upload_id, exc)
+
+    def _persist(self, job: dict[str, Any]) -> None:
+        self._persist_disk(job)
+        self._persist_firestore(job)
 
     def _load_disk(self, upload_id: str) -> dict[str, Any] | None:
         path = self._path(upload_id)
@@ -58,8 +118,22 @@ class DetectJobStore:
             if isinstance(data, dict):
                 return data
         except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("[detect-job] falha ao ler %s: %s", upload_id, exc)
+            logger.warning("[detect-job] falha ao ler disco %s: %s", upload_id, exc)
         return None
+
+    def _load_firestore(self, upload_id: str) -> dict[str, Any] | None:
+        db = _firestore_db()
+        if not db:
+            return None
+        try:
+            snap = db.collection(FIRESTORE_COLLECTION).document(upload_id).get()
+            if not snap.exists:
+                return None
+            data = snap.to_dict()
+            return data if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.warning("[detect-job] falha ao ler Firestore %s: %s", upload_id, exc)
+            return None
 
     def init_job(
         self,
@@ -96,8 +170,11 @@ class DetectJobStore:
             job = self._jobs.get(upload_id)
             if job is None:
                 job = self._load_disk(upload_id)
-                if job:
-                    self._jobs[upload_id] = job
+            if job is None:
+                job = self._load_firestore(upload_id)
+            if job:
+                self._jobs[upload_id] = job
+                self._persist_disk(job)
             if not job:
                 return None
             job = self._mark_stale_if_needed(job)
@@ -129,7 +206,9 @@ class DetectJobStore:
 
     def update(self, upload_id: str, **fields: Any) -> dict[str, Any] | None:
         with self._lock:
-            job = self._jobs.get(upload_id) or self._load_disk(upload_id)
+            job = self._jobs.get(upload_id) or self._load_disk(upload_id) or self._load_firestore(
+                upload_id
+            )
             if not job:
                 return None
             job.update(fields)
@@ -147,6 +226,12 @@ class DetectJobStore:
                     path.unlink()
                 except OSError:
                     pass
+        db = _firestore_db()
+        if db:
+            try:
+                db.collection(FIRESTORE_COLLECTION).document(upload_id).delete()
+            except Exception as exc:
+                logger.warning("[detect-job] falha ao limpar Firestore %s: %s", upload_id, exc)
         logger.info("[detect-job] cleared upload=%s", upload_id)
 
     def heartbeat(

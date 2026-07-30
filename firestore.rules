@@ -46,7 +46,7 @@ service cloud.firestore {
     // Status de jobs de detecção (escrita via Admin SDK no Cloud Run).
     match /detect_jobs/{uploadId} {
       allow read: if request.auth != null
-        && resource.data.userId == request.auth.uid;
+        && resource.data.user_id == request.auth.uid;
       allow create, update, delete: if false;
     }
   }

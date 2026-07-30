@@ -126,3 +126,51 @@ async def download_pdf_bytes_async(*, upload_id: str, user_id: str) -> Optional[
         upload_id=upload_id,
         user_id=user_id,
     )
+
+
+def upload_bytes(
+    storage_path: str,
+    data: bytes,
+    *,
+    content_type: str = "application/octet-stream",
+) -> bool:
+    """Upload genérico (ex.: cache de tabelas JSON) para o bucket."""
+    bucket = _get_bucket()
+    if not bucket:
+        return False
+    try:
+        blob = bucket.blob(storage_path)
+        blob.upload_from_string(data, content_type=content_type)
+        logger.info("Blob salvo no Storage: %s (%s bytes)", storage_path, len(data))
+        return True
+    except Exception as exc:
+        logger.error("Erro ao enviar blob %s: %s", storage_path, exc)
+        return False
+
+
+def download_bytes(storage_path: str) -> Optional[bytes]:
+    bucket = _get_bucket()
+    if not bucket:
+        return None
+    try:
+        blob = bucket.blob(storage_path)
+        if not blob.exists():
+            return None
+        return blob.download_as_bytes()
+    except Exception as exc:
+        logger.warning("Erro ao baixar blob %s: %s", storage_path, exc)
+        return None
+
+
+def delete_blob(storage_path: str) -> bool:
+    bucket = _get_bucket()
+    if not bucket:
+        return False
+    try:
+        blob = bucket.blob(storage_path)
+        if blob.exists():
+            blob.delete()
+        return True
+    except Exception as exc:
+        logger.warning("Erro ao apagar blob %s: %s", storage_path, exc)
+        return False

@@ -51,6 +51,8 @@ FRONTEND_URLS = [
         "http://127.0.0.1:5173",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:8001",
+        "https://borderless-5a4c8.web.app",
+        "https://borderless-5a4c8.firebaseapp.com",
         "https://410-thora.netlify.app",
         "https://410-thora-construcaob.netlify.app",
         "https://410-borderles.netlify.app",
@@ -62,7 +64,11 @@ FRONTEND_URLS = [
     if url
 ]
 
-CORS_ORIGIN_REGEX = os.getenv("CORS_ORIGIN_REGEX", r"https://[\w-]+\.netlify\.app")
+# Netlify + Firebase Hosting (web.app / firebaseapp.com)
+CORS_ORIGIN_REGEX = os.getenv(
+    "CORS_ORIGIN_REGEX",
+    r"https://[\w-]+\.(netlify\.app|web\.app|firebaseapp\.com)",
+)
 
 API_TITLE = "Thora Construção API"
 API_VERSION = "2.0.0"

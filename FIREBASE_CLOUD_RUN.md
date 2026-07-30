@@ -2,84 +2,88 @@
 
 ## Arquitetura
 
-- **Frontend:** Netlify
-- **Auth / Firestore / Storage:** Firebase projeto `borderless-5a4c8`
-- **API (PDF + IA):** Cloud Run (`thora-api`) — FastAPI Python
+| Camada | Serviço |
+|--------|---------|
+| **Frontend (SPA)** | Firebase Hosting — `https://borderless-5a4c8.web.app` |
+| **Auth / Firestore / Storage** | Firebase projeto `borderless-5a4c8` |
+| **API (PDF + IA)** | Cloud Run `thora-api` |
 
-O Render Free **não** é mais o alvo de produção.
+**Importante:** o front chama o Cloud Run **direto** (`VITE_API_URL`).  
+Não use rewrite Hosting → Cloud Run para `/api`: o Hosting limita proxy a **60s** e jobs de PDF/IA passam disso.
+
+O Netlify pode continuar como espelho legado; produção oficial é Firebase Hosting.
 
 ## Pré-requisitos
 
 1. Plano **Blaze** no Firebase (`borderless-5a4c8`)
-2. `gcloud` CLI autenticado na mesma conta Google do projeto
-3. Secrets no Secret Manager (recomendado):
+2. `gcloud` CLI (ou SDK em `.tools/google-cloud-sdk`)
+3. `firebase` CLI (`npm install -g firebase-tools`)
+4. Secrets no Secret Manager (recomendado):
    - `OPENAI_API_KEY`
    - `FIREBASE_CREDENTIALS` (JSON da service account, se não usar ADC)
 
 ```bash
-# Exemplo — criar secrets
 printf '%s' "$OPENAI_API_KEY" | gcloud secrets create OPENAI_API_KEY --data-file=- --project=borderless-5a4c8
 printf '%s' "$FIREBASE_CREDENTIALS" | gcloud secrets create FIREBASE_CREDENTIALS --data-file=- --project=borderless-5a4c8
-
-# Dar acesso à service account do Cloud Run (substitua PROJECT_NUMBER)
-gcloud secrets add-iam-policy-binding OPENAI_API_KEY \
-  --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
-  --role="roles/secretmanager.secretAccessor" \
-  --project=borderless-5a4c8
 ```
 
-## 1. Rules Firebase
+## Deploy completo
 
 ```bash
 cd /path/to/410---thora-construcao
-npx -y firebase-tools@latest use borderless-5a4c8
-npx -y firebase-tools@latest deploy --only firestore:rules,storage
+chmod +x scripts/deploy-all-production.sh
+./scripts/deploy-all-production.sh
 ```
 
-## 2. Deploy API (Cloud Run)
+O script:
+
+1. Atualiza `main`
+2. Faz deploy do Cloud Run (CORS já inclui `*.web.app` / `*.firebaseapp.com`)
+3. Deploy das rules Firestore + Storage
+4. Build do front com `VITE_API_URL=<Cloud Run>` e `firebase deploy --only hosting`
+
+## Deploy só da API
 
 ```bash
-chmod +x scripts/deploy-cloud-run.sh
 ./scripts/deploy-cloud-run.sh
 ```
-
-Variáveis úteis:
 
 | Env | Default |
 |-----|---------|
 | `CLOUD_RUN_MEMORY` | `2Gi` |
-| `CLOUD_RUN_MIN_INSTANCES` | `1` (instância sempre aquecida; CPU always allocated no deploy) |
+| `CLOUD_RUN_MAX_INSTANCES` | `1` (evita poll de detect-tables em outra réplica sem estado) |
 | `CLOUD_RUN_REGION` | `us-central1` |
 
-URL atual: `https://thora-api-333573409559.us-central1.run.app`
+URL atual da API: `https://thora-api-333573409559.us-central1.run.app`
 
-## 3. Frontend (Netlify)
+## Detecção de tabelas (Cloud Run)
 
-1. `netlify.toml` / `frontend/.env.production` já apontam para o Cloud Run acima
-2. Confirme no painel Netlify: Site settings → Environment → `VITE_API_URL` (mesma URL)
-3. Redeploy do site Netlify (obrigatório para rebuildar o bundle)
-4. Firebase Console → Authentication → Settings → Authorized domains → adicione `410-thora-construcaob.netlify.app`
+Status de `detect-tables` e cache de candidatos **não** ficam só em `/tmp`:
 
-## 4. Smoke test
+- progresso do job → Firestore `detect_jobs/{uploadId}`
+- cache com `rows` → Storage `table_caches/{uploadId}_tables.json`
+
+Assim o poll de status funciona mesmo com mais de uma instância. Default de deploy: `max-instances=1`.
+
+
+Firebase Console → Authentication → Settings → Authorized domains — garanta:
+
+- `borderless-5a4c8.web.app`
+- `borderless-5a4c8.firebaseapp.com`
+
+(Normalmente já vêm no projeto Hosting.)
+
+## Smoke test
 
 ```bash
 curl -s https://thora-api-333573409559.us-central1.run.app/health
 # → {"status":"ok","service":"thora-api","version":"2.0.0"}
 ```
 
-No app: login → upload PDF → detectar tabelas (progresso) → processar → validação.
+No app (`https://borderless-5a4c8.web.app`): login → upload PDF → detectar tabelas → processar → validação → Curva ABC.
 
-## 5. Desligar Render
+## Custos (Blaze)
 
-Após validar:
-
-1. Render Dashboard → serviço `410---thora-construcao` → suspender ou desligar auto-deploy
-2. Remova `VITE_API_URL` antiga `*.onrender.com`
-
-## Custos
-
-- Blaze pay-as-you-go
-- Cloud Run min=0: barato + cold start
-- Cloud Run min=1: ~US$ 10–30/mês, sempre quente
-- Storage/Firestore: baixo no volume atual
-- OpenAI: igual ao de hoje
+- Cloud Run min=1: ~US$ 10–30/mês (sempre quente)
+- Hosting / Firestore / Storage: baixo no volume atual
+- OpenAI: conforme uso

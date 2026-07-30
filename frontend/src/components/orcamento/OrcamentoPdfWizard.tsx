@@ -564,7 +564,7 @@ export function OrcamentoPdfWizard({
       const ready = await connectBackendWithToast();
       if (!ready) {
         throw new Error(
-          "Servidor da API no Render está acordando ou indisponível. Aguarde o toast ficar verde (Backend conectado) e tente novamente.",
+          "API (Cloud Run) indisponível no momento. Aguarde o toast ficar verde (Backend conectado) e tente novamente.",
         );
       }
 

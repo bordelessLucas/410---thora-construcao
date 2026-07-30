@@ -9,16 +9,17 @@ function parseIntervalMs(): number {
   return Number.isFinite(parsed) && parsed >= 60_000 ? parsed : DEFAULT_INTERVAL_MS;
 }
 
-/** Ativo para backends que dormem (Render Free / Cloud Run min=0), ou forçado via env. */
+/** Ativo só para backends que dormem (Render Free). Cloud Run com min=1 não precisa. */
 export function shouldEnableBackendKeepAlive(apiBase = getApiBaseUrl()): boolean {
   const flag = String(import.meta.env.VITE_KEEP_ALIVE_ENABLED ?? "").toLowerCase();
   if (flag === "false" || flag === "0") return false;
   if (flag === "true" || flag === "1") return true;
-  return /\.onrender\.com/i.test(apiBase) || /\.run\.app/i.test(apiBase);
+  // Não martelar *.run.app — min-instances=1 e pings extras geram 429.
+  return /\.onrender\.com/i.test(apiBase);
 }
 
 /**
- * Inicia pings periódicos leves (só Image, sem XHR) para reduzir sleep do Render.
+ * Pings leves para backends que dormem (Render Free).
  * Evita axios em /health no intervalo — durante 502 o proxy não manda CORS e polui o console.
  */
 export function startBackendKeepAlive(options?: {

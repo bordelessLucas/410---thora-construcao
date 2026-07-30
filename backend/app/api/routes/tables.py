@@ -62,17 +62,30 @@ def _job_to_response(job: dict[str, Any]) -> TableDetectResponse:
     status = str(job.get("status") or "processing")
     result = job.get("result")
     if status == "completed" and isinstance(result, dict):
+        options = list(result.get("options") or [])
+        # Result truncado no Firestore → hidratar do cache (Storage/disco).
+        if not options and (
+            result.get("options_in_cache") or int(result.get("tables_found") or 0) > 0
+        ):
+            cached_opts, _ = _table_cache.get(str(job.get("upload_id") or ""))
+            if cached_opts:
+                options = public_options_from_raw(cached_opts)
+        recommended = list(result.get("recommended_table_ids") or [])
+        if not recommended and options:
+            recommended = recommended_table_ids(options)
         return TableDetectResponse(
             status="success",
             upload_id=str(job.get("upload_id")),
-            tables_found=int(result.get("tables_found") or 0),
-            options=list(result.get("options") or []),
+            tables_found=int(result.get("tables_found") or len(options) or 0),
+            options=options,
             mock_fallback=bool(result.get("mock_fallback")),
             cached=bool(result.get("cached")),
-            recommended_table_ids=list(result.get("recommended_table_ids") or []),
+            recommended_table_ids=recommended,
             pages_total=int(job.get("pages_total") or 0),
             pages_done=int(job.get("pages_done") or job.get("pages_total") or 0),
-            candidates_found=int(job.get("candidates_found") or result.get("tables_found") or 0),
+            candidates_found=int(
+                job.get("candidates_found") or result.get("tables_found") or len(options) or 0
+            ),
             message=str(job.get("message") or "Detecção concluída"),
         )
     return TableDetectResponse(
