@@ -215,6 +215,62 @@ def test_extract_approx_29_items_and_totals():
     assert abs(float(finance["total_geral"]["soma_folhas"]) - EXPECTED_TOTAL) <= 1.0
 
 
+def test_art_crea_faixa_not_treated_as_header():
+    """
+    ART DE OBRA… FAIXA 2… não pode ser is_header_row (serviço+und+faixa = 3 hits).
+    """
+    parser = BudgetParser()
+    header = [
+        "CÓDIGO",
+        "DESCRIÇÃO",
+        "UNID",
+        "QUANTIDADE",
+        "CUSTO UNIT",
+        "CUSTO PARCIAL",
+        "% INCID",
+        "% ACUMUL",
+        "FAIXA",
+    ]
+    art_row = [
+        "CREA/DF",
+        "ART DE OBRA OU SERVIÇO - FAIXA 2 - CONTRATO ACIMA DE R$ 15.000,00 - 2026",
+        "UND",
+        "20,00",
+        "262,55",
+        "5.251,00",
+        "0,071%",
+        "99,929%",
+        "C",
+    ]
+    assert parser.is_header_row(header) is True
+    assert parser.is_header_row(art_row) is False
+
+    rows = [
+        header,
+        [
+            "90001",
+            "DESLOCAMENTO ENTRE FUROS",
+            "UN",
+            "1,00",
+            "100,00",
+            "100,00",
+            "1,000%",
+            "1,000%",
+            "C",
+        ],
+        art_row,
+        ["", "REMOÇÃO DE PLACA DE SINALIZAÇÃO", "UN", "1,00", "3.117,00", "3.117,00", "0,042%", "99,971%", "C"],
+        ["", "TRANSPORTE COM MUNCK", "UN", "1,00", "62,33", "62,33", "0,001%", "100,000%", "C"],
+    ]
+    items, _ = parser.parse_table(rows, page=1)
+    assert len(items) == 4, f"esperava 4, veio {len(items)}: {[i.get('descricao') for i in items]}"
+    assert any(abs(float(i.get("valor_total") or 0) - 5251.0) < 0.05 for i in items)
+    art = next(i for i in items if abs(float(i.get("valor_total") or 0) - 5251.0) < 0.05)
+    assert "ART" in str(art.get("descricao") or "").upper()
+    assert abs(float(art.get("quantidade") or 0) - 20.0) < 0.01
+    assert abs(sum(float(i.get("valor_total") or 0) for i in items) - (100 + 5251 + 3117 + 62.33)) < 0.05
+
+
 def test_does_not_merge_trailing_abc_services():
     """Últimos serviços (mesmo Title Case) não podem fundir na descrição."""
     parser = BudgetParser()
@@ -394,6 +450,7 @@ def main() -> None:
         test_header_aliases_map_custo_parcial,
         test_profile_match_curva_abc,
         test_extract_approx_29_items_and_totals,
+        test_art_crea_faixa_not_treated_as_header,
         test_does_not_merge_trailing_abc_services,
         test_realign_numeric_description_descarte,
         test_abc_items_without_catalog_code_stay_executive,

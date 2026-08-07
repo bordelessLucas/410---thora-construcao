@@ -308,7 +308,25 @@ class BudgetParser:
         """Converte string em número (formato BRL canônico)."""
         from app.domain.money import parse_brl
 
-        return parse_brl(value)    
+        return parse_brl(value)
+
+    def _row_looks_like_priced_data(self, row: List[Any]) -> bool:
+        """True se a linha já tem 2+ valores numéricos (serviço, não cabeçalho)."""
+        moneyish = 0
+        for cell in row:
+            text = str(cell or "").strip()
+            if not text or len(text) > 24 or "%" in text:
+                continue
+            if re.search(r"[A-Za-zÀ-ÿ]", text) and not re.fullmatch(
+                r"[\d.,\sR$]+", text.replace("R$", "")
+            ):
+                continue
+            if self.parse_number(text) > 0:
+                moneyish += 1
+                if moneyish >= 2:
+                    return True
+        return False
+
     def is_header_row(self, row: List[Any]) -> bool:
         """Verifica se a linha é um cabeçalho"""
         if not row:
@@ -321,12 +339,23 @@ class BudgetParser:
         # Código de catálogo (SINAPI) na 1ª coluna = linha de dados, não cabeçalho
         if self.looks_like_catalog_code(first):
             return False
-        
-        # Converte para texto minúsculo
-        row_text = ' '.join(str(cell).lower() for cell in row if cell)
-        
-        # Conta quantas palavras-chave de cabeçalho aparecem
+
+        # Serviço precificado (ex.: ART com qtd/VU/parcial) nunca é cabeçalho,
+        # mesmo que a descrição contenha 'FAIXA' / 'SERVIÇO' / unidade UND.
+        if self._row_looks_like_priced_data(row):
+            return False
+
+        # Conta keywords só em células curtas (rótulos). Descrições longas
+        # ("… FAIXA 2 - CONTRATO…") não podem inflar o score de cabeçalho.
         keyword_count = 0
+        short_cells: list[str] = []
+        for cell in row:
+            cell_text = str(cell or "").strip().lower()
+            if not cell_text or len(cell_text) > 48:
+                continue
+            short_cells.append(cell_text)
+
+        row_text_short = " ".join(short_cells)
         all_keywords = (
             self.DESCRICAO_KEYWORDS
             + self.QUANTIDADE_KEYWORDS
@@ -343,14 +372,14 @@ class BudgetParser:
         )
 
         for keyword in all_keywords:
-            if self._keyword_in_text(keyword, row_text):
+            if self._keyword_in_text(keyword, row_text_short):
                 keyword_count += 1
 
-        has_codigo = any(self._keyword_in_text(k, row_text) for k in self.CODIGO_KEYWORDS)
-        has_qtd = any(self._keyword_in_text(k, row_text) for k in self.QUANTIDADE_KEYWORDS)
-        has_desc = any(self._keyword_in_text(k, row_text) for k in self.DESCRICAO_KEYWORDS)
-        has_val = any(self._keyword_in_text(k, row_text) for k in self.VALOR_KEYWORDS)
-        has_parcial = any(k in row_text for k in self.CUSTO_PARCIAL_KEYWORDS)
+        has_codigo = any(self._keyword_in_text(k, row_text_short) for k in self.CODIGO_KEYWORDS)
+        has_qtd = any(self._keyword_in_text(k, row_text_short) for k in self.QUANTIDADE_KEYWORDS)
+        has_desc = any(self._keyword_in_text(k, row_text_short) for k in self.DESCRICAO_KEYWORDS)
+        has_val = any(self._keyword_in_text(k, row_text_short) for k in self.VALOR_KEYWORDS)
+        has_parcial = any(k in row_text_short for k in self.CUSTO_PARCIAL_KEYWORDS)
 
         if self.is_abc_header_row(row):
             return True
