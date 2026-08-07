@@ -145,6 +145,21 @@ def resolve_pricing_contract(
 
     if vt_com <= 0 and vt_raw > 0:
         vt_com = vt_raw
+
+    # Corrige total colado na quantidade (falha clássica de extração ABC)
+    vu_hint = vu_raw if vu_raw > 0 else (vu_sem if vu_sem > 0 else vu_com)
+    if (
+        qty > 1
+        and vu_hint > 0
+        and vt_com > 0
+        and abs(vt_com - qty) <= max(0.01, abs(qty) * 1e-9)
+    ):
+        expected = qty * vu_hint
+        if abs(expected - vt_com) > max(1.0, abs(expected) * 0.02):
+            vt_com = expected
+            vt_raw = expected
+            alerts.append("Total igual à quantidade — recalculado como Qtd×VU")
+
     if vu_sem <= 0 and vu_com <= 0 and vu_raw > 0:
         # Ambiguity: detect S/BDI vs C/BDI against total
         bdi_hint = sanitize_bdi_percent(bdi)

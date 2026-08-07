@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from budget_parser import BudgetParser
@@ -109,3 +110,43 @@ def parse_generico(rows: list[list[Any]], page: int = 0) -> list[dict[str, Any]]
     return parse_with_budget_parser(
         rows, page, profile_id="generico_keywords", prefer_row_scan=True
     )
+
+
+def parse_curva_abc(rows: list[list[Any]], page: int = 0) -> list[dict[str, Any]]:
+    """
+    Curva ABC já pronta no PDF: CÓDIGO | DESCRIÇÃO | UNID | QTD | CUSTO UNIT |
+    CUSTO PARCIAL | % INCID | % ACUMUL | FAIXA.
+    """
+    parser = BudgetParser()
+    parsed, structure = parser.parse_table(rows, page=page)
+
+    # Sem item hierárquico: não usar row_scan NOVACAP; reforça se header ABC mapeou total
+    if len(parsed) < 3 and structure.get("valor_total", -1) >= 0:
+        # Reparse garantindo que identify_columns pegue aliases
+        parsed, structure = parser.parse_table(rows, page=page)
+
+    items = _to_items(parsed, page=page, profile_id="curva_abc")
+    for idx, item in enumerate(items, start=1):
+        qtd, vu, vt = BudgetParser.sanitize_abc_economics(
+            float(item.get("quantidade") or 0),
+            float(item.get("valor_unitario") or 0),
+            float(item.get("valor_total") or 0),
+        )
+        item["quantidade"] = qtd
+        item["valor_unitario"] = vu
+        item["valor_total"] = vt
+        item.setdefault("tipo_linha", "item")
+        item.setdefault("tipo", "item")
+        # Sem BDI neste layout — total econômico = custo parcial
+        if vt > 0:
+            item["valor_total_com_bdi"] = vt
+            item["valor_total_sem_bdi"] = vt
+        # NÃO copiar código SINAPI para item_numero (frontend interpreta dígitos
+        # soltos como grupo hierárquico e exclui da Curva ABC).
+        codigo = str(item.get("codigo") or "").strip()
+        item_num = str(item.get("item_numero") or item.get("item") or "").strip()
+        if not item_num or item_num == codigo or re.fullmatch(r"\d{4,}", item_num):
+            item["item_numero"] = str(idx)
+            item["item"] = str(idx)
+    return items
+

@@ -24,7 +24,20 @@ def _header_blob(rows: list[list[Any]], limit: int = 5) -> str:
         text = " ".join(str(c).lower() for c in row if str(c).strip())
         if any(
             tok in text
-            for tok in ("item", "código", "codigo", "descri", "quant", "valor", "total", "bdi")
+            for tok in (
+                "item",
+                "código",
+                "codigo",
+                "descri",
+                "quant",
+                "valor",
+                "total",
+                "bdi",
+                "custo",
+                "faixa",
+                "incid",
+                "acumul",
+            )
         ):
             parts.append(text)
     if not parts and rows:
@@ -164,6 +177,28 @@ def score_profile_against_rows(
             reasons.append("title:analitico")
         if "sintético" in blob or "sintetico" in blob:
             score -= 0.35
+
+    elif profile.id == "curva_abc":
+        abc_title = "curva abc" in blob
+        if abc_title:
+            score += 0.45
+            reasons.append("title:curva_abc")
+        abc_cols = sum(
+            1
+            for t in ("custo parcial", "custo unit", "faixa", "incid", "acumul")
+            if t in header
+        )
+        if abc_cols >= 2:
+            score += 0.35
+            reasons.append(f"cols:abc={abc_cols}")
+        if "código" in header or "codigo" in header:
+            score += 0.1
+        # Penaliza layout sintético hierárquico clássico
+        if xyz >= 5 and "peso" in header:
+            score -= 0.4
+            reasons.append("penalty:sintetico_layout")
+        if "bdi" in header and "custo parcial" not in header:
+            score -= 0.15
 
     confidence = max(0.0, min(1.0, score))
     return ProfileMatch(

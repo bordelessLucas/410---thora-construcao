@@ -98,6 +98,18 @@ def infer_tipo_linha(
     if is_group_num and not codigo:
         return "grupo"
 
+    # Código de catálogo (SINAPI/SICRO) com financeiro = serviço executivo
+    # mesmo quando item_numero foi preenchido com o próprio código (Curva ABC pronta).
+    catalog_code = bool(
+        codigo
+        and (
+            re.fullmatch(r"\d{4,}(?:-\s*[A-Za-zÀ-ÿ0-9._/-]+)?", codigo)
+            or re.fullmatch(r"[A-Za-z]{1,4}\s*\d{2,}(?:[.\-/]\d+)*", codigo)
+        )
+    )
+    if catalog_code and (valor_total > 0 or (quantidade > 0 and valor_unitario > 0)):
+        return "item"
+
     # Código que na verdade é descrição (linha de grupo com colunas desalinhadas)
     if is_group_num and codigo:
         codigo_limpo = codigo.strip()
@@ -140,6 +152,11 @@ def infer_tipo_linha(
     if codigo_ok and (valor_total > 0 or (quantidade > 0 and valor_unitario > 0)):
         return "item"
     if is_xyz and (valor_total > 0 or (quantidade > 0 and valor_unitario > 0)):
+        return "item"
+    # Curva ABC: tipagem explícita "item" + financeiro prevalece sobre nº sequencial 1..N
+    if hint in {"item", "servico", "serviço", ""} and has_financial:
+        return "item"
+    if is_group_num and has_financial and hint == "item":
         return "item"
     if is_group_num:
         return "grupo"
@@ -280,8 +297,13 @@ def enrich_item_pricing_and_type(raw: dict[str, Any]) -> dict[str, Any]:
 
 def classify_abc_items(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Pareto 80/95: classificação pelo acumulado *antes* de incluir o item.
-    Itens não elegíveis mantêm classification=None e ficam ao final.
+    Pareto 80/95: classificação pelo acumulado *depois* de incluir o item.
+
+    A: acumulado <= 80%
+    B: 80% < acumulado <= 95%
+    C: acumulado > 95%
+
+    Alinhado a Curvas ABC de serviços em PDF (FAIXA do documento).
     """
     enriched = [enrich_item_pricing_and_type(dict(i)) for i in items if isinstance(i, dict)]
 
@@ -303,14 +325,13 @@ def classify_abc_items(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
     for item in executives:
         value = line_total_com_bdi(item)
-        pct_before = (accumulated / total * 100.0) if total > 0 else 0.0
         accumulated += value
         pct_after = (accumulated / total * 100.0) if total > 0 else 0.0
         individual = (value / total * 100.0) if total > 0 else 0.0
 
-        if pct_before < 80:
+        if pct_after <= 80:
             cls = "A"
-        elif pct_before < 95:
+        elif pct_after <= 95:
             cls = "B"
         else:
             cls = "C"
@@ -355,5 +376,5 @@ def build_abc_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
         "class_b": _bucket("B"),
         "class_c": _bucket("C"),
         "thresholds": {"a": 80, "b": 95},
-        "algorithm": "pareto_before_item_80_95",
+        "algorithm": "pareto_after_item_80_95",
     }

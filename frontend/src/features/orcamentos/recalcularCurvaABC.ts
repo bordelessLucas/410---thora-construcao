@@ -79,6 +79,25 @@ export function resolveTipoLinha(item: {
   const codigo = String(item.codigo ?? item.catalogCode ?? "").trim();
   const isXyz = /^\d+\.\d+\.\d+/.test(itemNumero);
   const isGroupNum = /^\d+(?:\.\d+)?$/.test(itemNumero) && !isXyz;
+  const total = Number(item.valorTotalComBdi ?? item.lineTotal ?? item.valor_total ?? 0);
+
+  // Tipado como item com valor = folha (inclui serviços ABC sem código SINAPI)
+  if (tipo === "item" && total > 0 && !/^GRUPO\b/i.test(descricao.trim())) {
+    return "item";
+  }
+
+  // Curva ABC / SINAPI: código de catálogo (4+ dígitos) com valor = item executivo
+  const catalogCodeLike =
+    Boolean(codigo) &&
+    (/^\d{4,}(?:-.*)?$/i.test(codigo) || /^[A-Za-z]{1,4}\s*\d{2}/.test(codigo));
+  const itemNumeroLooksLikeCatalog = /^\d{4,}$/.test(itemNumero);
+  if ((catalogCodeLike || itemNumeroLooksLikeCatalog) && total > 0) {
+    return "item";
+  }
+  if (tipo === "item" && catalogCodeLike) {
+    return "item";
+  }
+
   const codigoSeemsCatalog =
     Boolean(codigo) &&
     codigo !== itemNumero &&
@@ -89,13 +108,18 @@ export function resolveTipoLinha(item: {
     /\b(SINAPI|SICRO3?|ORSE|TCPO|SEINFRA|SIURB|EMOP|CDHU|DNIT|ANP|Pr[oó]prio|PR[OÓ]PRIA)\b/i.test(
       descricao,
     ) || /^\s*\d{5,}\b/.test(descricao.trim());
-  const total = Number(item.valorTotalComBdi ?? item.lineTotal ?? item.valor_total ?? 0);
   const looksPricedLeaf =
     hasCatalogInDescription && total > 0 && !/^GRUPO\b/i.test(descricao.trim());
 
   // X ou X.Y sem código de catálogo real = cabeçalho de grupo (sintético)
   // Exceto quando a descrição já carrega código/banco de serviço precificado.
-  if (isGroupNum && !codigoSeemsCatalog && !looksPricedLeaf) {
+  // Não tratar códigos SINAPI puros (≥4 dígitos) como grupo.
+  if (
+    isGroupNum &&
+    !itemNumeroLooksLikeCatalog &&
+    !codigoSeemsCatalog &&
+    !looksPricedLeaf
+  ) {
     return "grupo";
   }
 
@@ -114,6 +138,8 @@ export function resolveTipoLinha(item: {
     return "item";
   }
   if (isGroupNum) {
+    // Nº sequencial 1..N com valor e tipo=item (Curva ABC) não é cabeçalho de grupo
+    if (tipo === "item" && total > 0) return "item";
     return "grupo";
   }
   return tipo === "composicao" ? "composicao" : "item";
@@ -139,9 +165,18 @@ export function isExecutiveItem(
 ): boolean {
   const tipo = resolveTipoLinha(item);
   const desc = item.description.toLowerCase();
-  if (tipo !== "item" || desc.includes("total do grupo")) return false;
+  if (desc.includes("total do grupo")) return false;
   if (item.quarantine === true || item.abcEligible === false) return false;
-  if ((item.lineTotal ?? 0) <= 0 && (item.valorTotalComBdi ?? 0) <= 0) return false;
+  const total = Number(item.lineTotal ?? item.valorTotalComBdi ?? 0);
+  if (total <= 0) return false;
+
+  const codigo = String(item.catalogCode ?? "").trim();
+  const catalogLike =
+    /^\d{4,}(?:-.*)?$/i.test(codigo) || /^[A-Za-z]{1,4}\s*\d{2}/.test(codigo);
+  // Curva ABC / SINAPI: qualquer serviço precificado com código de catálogo entra
+  if (catalogLike) return true;
+  if (tipo !== "item") return false;
+
   // Evita somar grupo + filhos (ex.: 1.2 + 1.2.1), mas mantém serviço
   // precificado mesmo com filho fantasma por numeração inconsistente no PDF.
   const numeros = allItemNumeros ?? [];
@@ -152,9 +187,8 @@ export function isExecutiveItem(
       Number(item.valorUnitarioComBdi) ||
       Number(item.unitPrice) ||
       0;
-    const total = Number(item.valorTotalComBdi ?? item.lineTotal) || 0;
-    const codigo = String(item.catalogCode ?? "").trim();
-    const priced = qty > 0 && vu > 0 && (Boolean(codigo) || Math.abs(vu - total) > 0.02);
+    const priced =
+      qty > 0 && vu > 0 && (Boolean(codigo) || Math.abs(vu - total) > 0.02);
     if (!priced) return false;
   }
   return true;
@@ -271,6 +305,23 @@ export function resolveStructuredItemPricing(
 
   const tolerance = 0.02;
 
+  // Correção: total colado na quantidade (extração ABC) → usar Qtd×VU
+  if (
+    qty > 1 &&
+    vuRaw > 0 &&
+    vtCom > 0 &&
+    Math.abs(vtCom - qty) <= Math.max(0.01, Math.abs(qty) * 1e-9)
+  ) {
+    const expected = qty * vuRaw;
+    if (Math.abs(expected - vtCom) > Math.max(1, expected * 0.02)) {
+      vtCom = expected;
+      alerts.push("Total igual à quantidade — recalculado como Qtd×VU (custo parcial)");
+    }
+  }
+  if (qty > 0 && vuRaw > 0 && vtCom <= 0) {
+    vtCom = qty * vuRaw;
+  }
+
   if (vuSem <= 0 && vuCom <= 0 && vuRaw > 0) {
     if (qty > 0 && vtCom > 0) {
       const errAsCom = relativeError(qty * vuRaw, vtCom);
@@ -350,21 +401,53 @@ export function resolveStructuredItemPricing(
 
 /**
  * Recalcula lineTotal, ordena por valor, percentuais e classificação A/B/C.
- * Itens grupo/quarentena permanecem fora da curva.
+ * Classifica pelo acumulado *depois* de incluir o item (A≤80, B≤95, C>95).
  */
 export function recalcularCurvaABC(items: OrcamentoItem[]): OrcamentoItem[] {
   const withTotals = items.map((item) => {
-    const calculated = calcularLineTotalComBdi(item.qty, item.unitPrice, item.bdi);
+    const qty = Number(item.qty) || 0;
+    const vu = Number(item.unitPrice) || 0;
+    let vtCom = Number(item.valorTotalComBdi) || 0;
+    let reference = Number(item.referenceLineTotal) || 0;
+
+    // Total colado na quantidade
+    if (
+      qty > 1 &&
+      vu > 0 &&
+      vtCom > 0 &&
+      Math.abs(vtCom - qty) <= Math.max(0.01, Math.abs(qty) * 1e-9)
+    ) {
+      const expected = qty * vu;
+      if (Math.abs(expected - vtCom) > Math.max(1, expected * 0.02)) {
+        vtCom = expected;
+      }
+    }
+    if (
+      qty > 1 &&
+      vu > 0 &&
+      reference > 0 &&
+      Math.abs(reference - qty) <= Math.max(0.01, Math.abs(qty) * 1e-9)
+    ) {
+      const expected = qty * vu;
+      if (Math.abs(expected - reference) > Math.max(1, expected * 0.02)) {
+        reference = expected;
+      }
+    }
+
+    const calculated = calcularLineTotalComBdi(qty, vu, item.bdi);
     const lineTotal =
-      item.referenceLineTotal && item.referenceLineTotal > 0
-        ? item.referenceLineTotal
-        : item.valorTotalComBdi && item.valorTotalComBdi > 0
-          ? item.valorTotalComBdi
+      reference > 0
+        ? reference
+        : vtCom > 0
+          ? vtCom
           : calculated;
     return {
       ...item,
+      qty,
+      unitPrice: vu,
       lineTotal,
       valorTotalComBdi: lineTotal,
+      referenceLineTotal: reference > 0 ? reference : item.referenceLineTotal,
     };
   });
 
@@ -385,7 +468,6 @@ export function recalcularCurvaABC(items: OrcamentoItem[]): OrcamentoItem[] {
   let accumulatedValue = 0;
 
   const classified = sorted.map((item) => {
-    const prevPercentage = totalValue > 0 ? (accumulatedValue / totalValue) * 100 : 0;
     accumulatedValue += item.lineTotal;
     const accumulatedPercentage =
       totalValue > 0 ? (accumulatedValue / totalValue) * 100 : 0;
@@ -393,9 +475,9 @@ export function recalcularCurvaABC(items: OrcamentoItem[]): OrcamentoItem[] {
       totalValue > 0 ? (item.lineTotal / totalValue) * 100 : 0;
 
     let classification: "A" | "B" | "C" = "C";
-    if (prevPercentage < 80) {
+    if (accumulatedPercentage <= 80) {
       classification = "A";
-    } else if (prevPercentage < 95) {
+    } else if (accumulatedPercentage <= 95) {
       classification = "B";
     }
 

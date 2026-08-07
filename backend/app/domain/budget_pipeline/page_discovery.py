@@ -214,6 +214,7 @@ def discover_budget_pages(
     hint_pages: list[int] | None = None,
     min_score: int = 40,
     max_pages: int = 40,
+    allow_abc_hints: bool = False,
 ) -> list[int]:
     """
     Retorna índices 0-based das páginas de planilha orçamentária.
@@ -222,9 +223,13 @@ def discover_budget_pages(
       1) pontua todas as páginas
       2) se houver hint (tabelas selecionadas), expande para bloco contíguo vizinho
       3) senão, pega o bloco contíguo de maior score (prioriza sintético/detalhado)
+
+    allow_abc_hints: quando o usuário selecionou tabela Curva ABC, as páginas
+    hint não são descartadas como hard-negative.
     """
     path = Path(pdf_path)
     scored: list[dict[str, Any]] = []
+    hint_set = set(hint_pages or [])
 
     with pdfplumber.open(path) as pdf:
         for idx, page in enumerate(pdf.pages):
@@ -241,17 +246,33 @@ def discover_budget_pages(
                 text = " ".join(str(w.get("text") or "") for w in (words or []))
             meta = score_page_text(text, words)
             meta["page_index"] = idx
+            # Página selecionada pelo usuário com Curva ABC: não tratar como lixo
+            if allow_abc_hints and idx in hint_set and meta.get("negative_title"):
+                meta["negative_title"] = False
+                meta["score"] = max(int(meta.get("score") or 0), min_score)
+                meta["user_abc_hint"] = True
             scored.append(meta)
 
     if not scored:
         return list(hint_pages or [])
 
+    def _hard_neg(s: dict[str, Any]) -> bool:
+        if allow_abc_hints and s.get("page_index") in hint_set:
+            return False
+        return _is_hard_negative(s)
+
     candidates = [
         s["page_index"]
         for s in scored
         if (s["score"] >= min_score or s["positive_title"] or s.get("strong_positive"))
-        and not _is_hard_negative(s)
-        and (s["hier_items"] >= 8 or s["positive_title"] or s.get("strong_positive"))
+        and not _hard_neg(s)
+        and (
+            s["hier_items"] >= 8
+            or s["positive_title"]
+            or s.get("strong_positive")
+            or s.get("user_abc_hint")
+            or (allow_abc_hints and s["page_index"] in hint_set)
+        )
     ]
 
     def _trim_after_hierarchy_drop(indices: list[int]) -> list[int]:

@@ -738,6 +738,7 @@ export function OrcamentoPdfWizard({
           items: result.items ?? result.structured_items,
           structured_items: result.items ?? result.structured_items,
           hierarchical_items: result.items ?? result.hierarchical_items ?? result.structured_items,
+          extraction_diagnostics: result.extraction_diagnostics,
           ia_metadata: result.ia_metadata ?? {
             engine: result.engine,
             analysis_types: result.analysis_types,
@@ -749,7 +750,26 @@ export function OrcamentoPdfWizard({
         selectedTablePreviews,
       );
     } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : "Erro ao processar tabelas";
+      const axiosData =
+        error && typeof error === "object" && "response" in error
+          ? (
+              error as {
+                response?: { data?: { detail?: unknown; message?: string } };
+              }
+            ).response?.data
+          : undefined;
+      const detail = axiosData?.detail;
+      let msg = error instanceof Error ? error.message : "Erro ao processar tabelas";
+      if (typeof detail === "string") {
+        msg = detail;
+      } else if (detail && typeof detail === "object") {
+        const d = detail as {
+          user_message?: string;
+          message?: string;
+          extraction_diagnostics?: unknown;
+        };
+        msg = d.user_message || d.message || msg;
+      }
       console.error("[wizard] process-tables falhou:", error);
       const isFinanceReject =
         /validação financeira|Total Geral|subtotal|diferença financeira/i.test(msg);

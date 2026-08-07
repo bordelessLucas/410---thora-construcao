@@ -57,6 +57,7 @@ def test_infer_tipo_xyz_is_item():
 
 
 def test_abc_pareto_80_95():
+    """Classifica pelo acumulado *depois* do item: A≤80, B≤95, C>95."""
     items = [
         {
             "item_numero": "1.1.1",
@@ -64,7 +65,7 @@ def test_abc_pareto_80_95():
             "tipo_linha": "item",
             "quantidade": 1,
             "valor_unitario": 100,
-            "valor_total": 850,
+            "valor_total": 700,
             "bdi": 0,
         },
         {
@@ -73,7 +74,7 @@ def test_abc_pareto_80_95():
             "tipo_linha": "item",
             "quantidade": 1,
             "valor_unitario": 100,
-            "valor_total": 100,
+            "valor_total": 200,
             "bdi": 0,
         },
         {
@@ -82,19 +83,21 @@ def test_abc_pareto_80_95():
             "tipo_linha": "item",
             "quantidade": 1,
             "valor_unitario": 100,
-            "valor_total": 50,
+            "valor_total": 100,
             "bdi": 0,
         },
     ]
     classified = classify_abc_items(items)
     by_num = {i["item_numero"]: i for i in classified if i.get("classification")}
-    assert by_num["1.1.1"]["classification"] == "A"  # 0% before → A
-    assert by_num["1.1.2"]["classification"] == "B"  # ~85% before → B
-    assert by_num["1.1.3"]["classification"] == "C"  # ~95% before → C
+    # 70% após 1º → A; 90% após 2º → B; 100% após 3º → C
+    assert by_num["1.1.1"]["classification"] == "A"
+    assert by_num["1.1.2"]["classification"] == "B"
+    assert by_num["1.1.3"]["classification"] == "C"
 
     summary = build_abc_summary(classified)
     assert summary["total_items"] == 3
     assert abs(summary["total_value"] - 1000) < 0.01
+    assert summary["algorithm"] == "pareto_after_item_80_95"
 
 
 def test_missing_prices_quarantine():
@@ -154,7 +157,8 @@ def test_grupo_excluded_from_abc():
     )
     executives = [i for i in classified if i.get("classification")]
     assert len(executives) == 1
-    assert executives[0]["classification"] == "A"
+    # Único item = 100% acumulado → C (regra após o item)
+    assert executives[0]["classification"] == "C"
 
 
 if __name__ == "__main__":

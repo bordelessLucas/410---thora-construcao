@@ -100,9 +100,21 @@ const CurvaABC: React.FC = () => {
       raw.valor_unitario_com_bdi ?? raw.valor_unitario ?? raw.unitPrice,
     );
     const bdi = toNumber(raw.bdi);
-    const valorTotalExplicit = toNumber(
+    let valorTotalExplicit = toNumber(
       raw.valor_total_com_bdi ?? raw.valor_total ?? raw.lineTotal,
     );
+    // Correção: total colado na quantidade → Qtd×VU (custo parcial)
+    if (
+      quantidade > 1 &&
+      valorUnitario > 0 &&
+      valorTotalExplicit > 0 &&
+      Math.abs(valorTotalExplicit - quantidade) <= Math.max(0.01, Math.abs(quantidade) * 1e-9)
+    ) {
+      const expected = quantidade * valorUnitario;
+      if (Math.abs(expected - valorTotalExplicit) > Math.max(1, expected * 0.02)) {
+        valorTotalExplicit = expected;
+      }
+    }
     const valorTotal =
       valorTotalExplicit > 0
         ? valorTotalExplicit
@@ -144,9 +156,8 @@ const CurvaABC: React.FC = () => {
 
   /**
    * Curva ABC (Pareto 80/15/5 em valor): ordena por valor total decrescente,
-   * acumula o % sobre o total do orçamento e classifica cada linha pelo % acumulado
-   * **antes** de somar o item (itens necessários para “subir” até 80% do valor ficam em A,
-   * inclusive o que cruza o corte — evita classificar um único item dominante como C).
+   * acumula o % sobre o total do orçamento e classifica pelo % acumulado
+   * *depois* de incluir o item (A ≤ 80%, B ≤ 95%, C > 95%).
    */
   const classifyItemsABC = (baseItems: Item[]): Item[] => {
     // Só linhas com valor (grupos/quarentena já vieram zerados)
@@ -160,14 +171,13 @@ const CurvaABC: React.FC = () => {
     let accumulated = 0;
 
     return sortedItems.map((item) => {
-      const pctBefore = total > 0 ? (accumulated / total) * 100 : 0;
       accumulated += item.valor_total;
       const accumulated_percentage = total > 0 ? (accumulated / total) * 100 : 0;
 
       let classification: "A" | "B" | "C" = "C";
-      if (pctBefore < 80) {
+      if (accumulated_percentage <= 80) {
         classification = "A";
-      } else if (pctBefore < 95) {
+      } else if (accumulated_percentage <= 95) {
         classification = "B";
       }
 
@@ -384,6 +394,17 @@ const CurvaABC: React.FC = () => {
     );
   };
 
+  const handleBackToValidacao = () => {
+    if (!uploadId) {
+      navigate("/analise-orcamento");
+      return;
+    }
+    // Preserva o state da sessão (itens / PDF ainda não persistidos) ao voltar
+    navigate(`/validacao/${uploadId}`, {
+      state: location.state ?? undefined,
+    });
+  };
+
   return (
     <div className="w-full min-h-full py-8 pb-16">
       <div className="mx-auto max-w-7xl px-4 sm:px-6">
@@ -391,7 +412,7 @@ const CurvaABC: React.FC = () => {
         <div className="mb-8 flex items-center gap-4">
           <button
             type="button"
-            onClick={() => navigate(uploadId ? `/validacao/${uploadId}` : "/analise-orcamento")}
+            onClick={handleBackToValidacao}
             className="rounded-xl p-2 text-slate-600 transition hover:bg-white/80"
             aria-label="Voltar para validação"
           >
@@ -408,15 +429,25 @@ const CurvaABC: React.FC = () => {
           </div>
         </div>
 
-        {/* Aviso de Itens Selecionados */}
+        {/* Aviso de Itens da validação */}
         {location.state?.items && !loading && (
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
             <div className="flex gap-3">
               <CheckCircle2 size={20} className="text-blue-600 flex-shrink-0 mt-0.5" />
               <div>
-                <h3 className="font-semibold text-blue-900">Análise de Itens Selecionados</h3>
+                <h3 className="font-semibold text-blue-900">
+                  Curva ABC do documento completo
+                </h3>
                 <p className="text-sm text-blue-700 mt-1">
-                  Analisando {items.length} {items.length === 1 ? 'item selecionado' : 'itens selecionados'} da página de validação.
+                  Analisando {items.length}{" "}
+                  {items.length === 1 ? "item" : "itens"} do orçamento
+                  {typeof (location.state as { orcamentoTotalItens?: number })
+                    ?.orcamentoTotalItens === "number" &&
+                  (location.state as { orcamentoTotalItens?: number })
+                    .orcamentoTotalItens !== items.length
+                    ? ` (${(location.state as { orcamentoTotalItens?: number }).orcamentoTotalItens} no documento)`
+                    : ""}
+                  .
                 </p>
               </div>
             </div>
@@ -476,9 +507,12 @@ const CurvaABC: React.FC = () => {
               <>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <div className="bg-white rounded-lg p-4 shadow-sm border border-slate-200">
-            <p className="text-sm text-slate-600">Valor Total</p>
+            <p className="text-sm text-slate-600">Total dos itens analisados</p>
             <p className="text-2xl font-bold mt-2">
               R$ {(summary.total / 1000).toFixed(1)}k
+            </p>
+            <p className="text-xs text-slate-500 mt-1">
+              {items.length} {items.length === 1 ? "item" : "itens"}
             </p>
           </div>
 
@@ -687,12 +721,12 @@ const CurvaABC: React.FC = () => {
                   após cada linha.
                 </li>
                 <li>
-                  • <strong>Classe A:</strong> linhas enquanto o acumulado ainda
-                  não atingiu 80% do valor do orçamento (regra 80/15/5 em valor).
+                  • <strong>Classe A:</strong> itens cujo acumulado (após incluir
+                  a linha) é ≤ 80% do valor do orçamento.
                 </li>
                 <li>
-                  • <strong>Classe B:</strong> de 80% a 95% do valor acumulado.{" "}
-                  <strong>Classe C:</strong> acima de 95%. A quantidade de itens
+                  • <strong>Classe B:</strong> acumulado &gt; 80% e ≤ 95%.{" "}
+                  <strong>Classe C:</strong> acumulado &gt; 95%. A quantidade de itens
                   em cada classe depende da concentração do seu orçamento.
                 </li>
               </ul>
@@ -718,7 +752,8 @@ const CurvaABC: React.FC = () => {
         {/* Botões de Ação */}
         <div className="flex gap-4 justify-between">
           <button
-            onClick={() => navigate(uploadId ? `/validacao/${uploadId}` : "/analise-orcamento")}
+            type="button"
+            onClick={handleBackToValidacao}
             className="px-6 py-2 bg-slate-200 text-slate-800 rounded-lg hover:bg-slate-300 transition font-medium"
           >
             ← Voltar

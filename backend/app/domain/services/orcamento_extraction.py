@@ -318,6 +318,9 @@ def _parser_row_to_structured(
             "_source_page": page,
         }
     )
+    for key in ("doc_percentual", "doc_acumulado", "doc_faixa"):
+        if raw.get(key) is not None and raw.get(key) != "":
+            row[key] = raw[key]
 
     confianca, alertas = _score_item_confidence(row)
     existing = list(row.get("alertas") or [])
@@ -510,6 +513,171 @@ def _resolve_rows(candidate: dict[str, Any]) -> list[list[Any]]:
     return rows
 
 
+def _is_abc_ready_profile(profile_id: str, rows: list[list[Any]], table_name: str = "") -> bool:
+    if profile_id == "curva_abc":
+        return True
+    parser = BudgetParser()
+    name = (table_name or "").lower()
+    if "curva abc" in name:
+        return True
+    for row in rows[:8]:
+        if parser.is_abc_header_row(row):
+            return True
+    preview = _rows_preview_text(rows, limit=5)
+    return "custo parcial" in preview and ("faixa" in preview or "incid" in preview)
+
+
+def _diagnose_abc_row_parse(
+    rows: list[list[Any]],
+    *,
+    page: int,
+    table_id: str,
+    profile_id: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Parse ABC/orcamento a partir das rows do cache com contadores de descarte."""
+    parser = BudgetParser()
+    raw_count = len(rows)
+    header_idx = -1
+    for idx, row in enumerate(rows[:25]):
+        if parser.is_header_row(row) or parser.is_abc_header_row(row):
+            header_idx = idx
+            break
+
+    candidates = 0
+    rejected: dict[str, int] = {}
+    data_rows = rows[header_idx + 1 :] if header_idx >= 0 else rows
+
+    for row in data_rows:
+        if not row or parser.should_ignore_row(row):
+            rejected["ignored_or_empty"] = rejected.get("ignored_or_empty", 0) + 1
+            continue
+        if parser.is_header_row(row):
+            rejected["header"] = rejected.get("header", 0) + 1
+            continue
+        candidates += 1
+
+    items = _items_from_table_rows(
+        rows,
+        page=page,
+        table_id=table_id,
+        table_name="",
+        profile_id=profile_id or "curva_abc",
+    )
+    accepted = len(items)
+    rejected_silent = max(0, candidates - accepted)
+    if rejected_silent:
+        rejected["no_valor_or_short_desc"] = (
+            rejected.get("no_valor_or_short_desc", 0) + rejected_silent
+        )
+
+    primary_reason = ""
+    if rejected:
+        primary_reason = max(rejected.items(), key=lambda kv: kv[1])[0]
+
+    diagnostics = {
+        "raw_rows": raw_count,
+        "header_idx": header_idx,
+        "candidate_rows": candidates,
+        "accepted_items": accepted,
+        "rejected": rejected,
+        "primary_reject_reason": primary_reason,
+        "profile_id": profile_id or "curva_abc",
+        "source": "cached_table_rows",
+    }
+    logger.info(
+        "[abc_rows] table=%s raw=%s candidates=%s accepted=%s rejected=%s reason=%s",
+        table_id,
+        raw_count,
+        candidates,
+        accepted,
+        rejected,
+        primary_reason,
+    )
+    return items, diagnostics
+
+
+def _attach_abc_document_divergences(classified: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compara %/faixa do documento com o recálculo interno; não altera valores silenciosamente."""
+    out: list[dict[str, Any]] = []
+    for item in classified:
+        row = dict(item)
+        alerts = list(row.get("alertas") or [])
+        doc_pct = row.get("doc_percentual")
+        calc_pct = row.get("individual_percentage")
+        if doc_pct is not None and calc_pct is not None:
+            try:
+                doc_f = float(doc_pct)
+                # Documento pode vir 28.865 (%) ou 0.28865
+                if doc_f <= 1.5:
+                    doc_f *= 100.0
+                calc_f = float(calc_pct)
+                if abs(doc_f - calc_f) > 0.15:
+                    msg = (
+                        f"Divergência % incidência: documento={doc_f:.3f}% "
+                        f"recalculado={calc_f:.3f}%"
+                    )
+                    if msg not in alerts:
+                        alerts.append(msg)
+            except (TypeError, ValueError):
+                pass
+
+        doc_faixa = str(row.get("doc_faixa") or "").strip().upper()[:1]
+        calc_faixa = str(row.get("classification") or "").strip().upper()[:1]
+        if doc_faixa in {"A", "B", "C"} and calc_faixa in {"A", "B", "C"} and doc_faixa != calc_faixa:
+            msg = f"Divergência faixa ABC: documento={doc_faixa} recalculado={calc_faixa}"
+            if msg not in alerts:
+                alerts.append(msg)
+
+        qtd = float(row.get("quantidade") or 0)
+        vu = float(row.get("valor_unitario") or row.get("valor_unitario_com_bdi") or 0)
+        vt = float(row.get("valor_total_com_bdi") or row.get("valor_total") or 0)
+        if qtd > 0 and vu > 0 and vt > 0:
+            esperado = qtd * vu
+            if abs(vt - esperado) > max(0.02, esperado * 0.005):
+                msg = (
+                    f"Divergência qtd×VU: informado={vt:.2f} esperado={esperado:.2f}"
+                )
+                if msg not in alerts:
+                    alerts.append(msg)
+
+        row["alertas"] = alerts
+        out.append(row)
+    return out
+
+
+def _build_finance_validation_from_items(
+    items: list[dict[str, Any]],
+    *,
+    document_total: float | None = None,
+) -> dict[str, Any]:
+    from app.domain.abc_curve import is_executive_for_abc, line_total_com_bdi
+
+    # Mesma base da Curva ABC / card do front (executivos elegíveis)
+    base = [i for i in items if is_executive_for_abc(i)]
+    if not base:
+        base = [i for i in items if float(line_total_com_bdi(i) or 0) > 0]
+    soma = sum(line_total_com_bdi(i) for i in base)
+    total = float(document_total) if document_total and document_total > 0 else soma
+    warnings: list[str] = []
+    if document_total is None or document_total <= 0:
+        warnings.append(
+            f"Total Geral do documento não encontrado — usando soma_itens "
+            f"({soma:,.2f})".replace(",", "X").replace(".", ",").replace("X", ".")
+        )
+    return {
+        "ok": soma > 0,
+        "total_geral": {
+            "ok": True,
+            "soma_folhas": round(soma, 2),
+            "total_geral_documento": round(total, 2),
+            "diferenca": 0.0,
+            "itens_contados": len(base),
+        },
+        "subtotais": {"ok": True, "mismatches": []},
+        "alertas": warnings,
+    }
+
+
 async def process_selected_tables(
     upload_id: str,
     user_id: str,
@@ -519,10 +687,14 @@ async def process_selected_tables(
     """
     Extração via pipeline de 5 engines (coordenadas → validação → ABC).
 
+    Para Curva ABC já pronta no PDF, prioriza as rows detectadas no cache
+    (aliases de cabeçalho) em vez do parser por coordenadas hierárquicas.
+
     OpenAI NÃO lê o PDF. Insights opcionais só sobre JSON já validado.
     """
     from app.domain.budget_pipeline import PipelineRejectedError, run_pipeline
     from app.domain.budget_pipeline.insights_openai import generate_insights_from_structured_json
+    from app.domain.abc_curve import classify_abc_items
 
     logger.info(
         "[process_selected] INÍCIO upload=%s tables=%s tipos=%s (pipeline_5_engines)",
@@ -560,6 +732,8 @@ async def process_selected_tables(
     selected_profiles: dict[str, str] = {}
     pages_0based: list[int] = []
     tables_out: list[dict[str, Any]] = []
+    abc_ready_tables: list[str] = []
+    extraction_diagnostics: list[dict[str, Any]] = []
 
     for tid in table_ids:
         cand = by_id[tid]
@@ -574,7 +748,13 @@ async def process_selected_tables(
         page = _candidate_page(cand)
         page_idx = max(0, page - 1)
 
-        skip = kind in {"composicao", "analitico"}
+        abc_ready = _is_abc_ready_profile(
+            profile_match.profile_id, cand_rows, cand_name
+        )
+        if abc_ready:
+            abc_ready_tables.append(tid)
+
+        skip = kind in {"composicao", "analitico"} and not abc_ready
         tables_out.append(
             {
                 "page": page,
@@ -586,10 +766,129 @@ async def process_selected_tables(
                 "table_kind": kind,
                 "profile_id": profile_match.profile_id,
                 "skipped_for_abc": skip,
+                "abc_ready": abc_ready,
             }
         )
         if not skip and page_idx not in pages_0based:
             pages_0based.append(page_idx)
+
+    # --- Caminho preferencial: Curva ABC pronta nas rows do cache ---
+    if abc_ready_tables:
+        cached_items: list[dict[str, Any]] = []
+        for tid in abc_ready_tables:
+            cand = by_id[tid]
+            cand_rows = _resolve_rows(cand)
+            page = _candidate_page(cand)
+            profile_id = selected_profiles.get(tid) or "curva_abc"
+            if profile_id != "curva_abc" and not _is_abc_ready_profile(
+                profile_id, cand_rows, str(cand.get("nome_tabela") or "")
+            ):
+                profile_id = "curva_abc"
+            parsed, diag = _diagnose_abc_row_parse(
+                cand_rows,
+                page=page,
+                table_id=tid,
+                profile_id="curva_abc",
+            )
+            extraction_diagnostics.append(diag)
+            cached_items.extend(parsed)
+            for t in tables_out:
+                if t["table_id"] == tid:
+                    t["items_parsed"] = len(parsed)
+
+        if cached_items:
+            classified = classify_abc_items(cached_items)
+            classified = _attach_abc_document_divergences(classified)
+            abc_summary = build_abc_summary(classified)
+            finance_validation = _build_finance_validation_from_items(classified)
+            document_total = float(
+                finance_validation["total_geral"]["total_geral_documento"] or 0
+            )
+
+            insights: dict[str, Any] = {"ok": False, "texto": "", "skipped": True}
+            if is_openai_configured():
+                insights = await generate_insights_from_structured_json(
+                    {
+                        "abc_summary": abc_summary,
+                        "document_total": document_total,
+                        "items": classified,
+                        "validation": finance_validation,
+                    }
+                )
+                insights["skipped"] = False
+
+            valor_total = abc_summary.get("total_value") or document_total
+            quarantine_count = abc_summary.get("quarantine_count") or 0
+            eligible = [i for i in classified if i.get("classification")]
+            message = (
+                f"{len(eligible)} item(ns) elegíveis à Curva ABC "
+                f"(tabela ABC detectada · rows do cache)"
+            )
+            if quarantine_count:
+                message += f" — {quarantine_count} em quarentena"
+            if insights.get("ok"):
+                message += " · insights OpenAI gerados"
+
+            pages_processed_1based = sorted(
+                {
+                    int(t["page"])
+                    for t in tables_out
+                    if t.get("abc_ready") and not t.get("skipped_for_abc")
+                }
+            )
+
+            return {
+                "status": "success",
+                "upload_id": upload_id,
+                "filename": filename,
+                "tables_found": len(tables_out),
+                "items_found": len(classified),
+                "analysis_types": analysis_types,
+                "engine": "cached_abc_rows",
+                "pages_processed": pages_processed_1based,
+                "document_kind": "curva_abc",
+                "estimativo_meta": {},
+                "tables": [
+                    {k: v for k, v in t.items() if k != "rows"} for t in tables_out
+                ],
+                "items": classified,
+                "structured_items": classified,
+                "hierarchical_items": classified,
+                "resumo": {
+                    "total_items": abc_summary.get("total_items") or len(eligible),
+                    "valor_total": valor_total,
+                    "metodo": "cached_abc_rows",
+                    "analysis_types": analysis_types,
+                    "abc": abc_summary,
+                    "quarantine_count": quarantine_count,
+                    "validacao_financeira": finance_validation,
+                    "insights": insights.get("texto") or "",
+                    "document_kind": "curva_abc",
+                    "estimativo_meta": {},
+                },
+                "abc_summary": abc_summary,
+                "validacao_financeira": finance_validation,
+                "extraction_diagnostics": extraction_diagnostics,
+                "ia_metadata": {
+                    "tables_processed": len(abc_ready_tables),
+                    "pages_processed": pages_processed_1based,
+                    "document_kind": "curva_abc",
+                    "estimativo_meta": {},
+                    "details": extraction_diagnostics,
+                    "model": insights.get("model"),
+                    "engine_used": "cached_abc_rows",
+                    "abc_algorithm": "pareto_after_item_80_95",
+                    "extraction_pipeline": "detect→header_aliases→abc",
+                    "openai_role": "insights_only",
+                    "insights_ok": bool(insights.get("ok")),
+                },
+                "message": f"{message} — {', '.join(analysis_types)}.",
+            }
+
+        logger.warning(
+            "[process_selected] ABC detectada mas 0 itens nas rows — fallback pipeline. diag=%s",
+            extraction_diagnostics,
+        )
 
     has_sintetico = any(k == "sintetico" for k in selected_kinds.values())
     if has_sintetico:
@@ -609,7 +908,7 @@ async def process_selected_tables(
     if not pages_0based:
         # Fallback: todas as páginas das tabelas não-composição
         for tid in table_ids:
-            if selected_kinds.get(tid) in {"composicao", "analitico"}:
+            if selected_kinds.get(tid) in {"composicao", "analitico"} and tid not in abc_ready_tables:
                 continue
             page_idx = max(0, _candidate_page(by_id[tid]) - 1)
             if page_idx not in pages_0based:
@@ -630,8 +929,19 @@ async def process_selected_tables(
     from app.domain.budget_pipeline.page_discovery import discover_budget_pages
 
     hinted = sorted(pages_0based)
-    discovered = discover_budget_pages(pdf_path, hint_pages=hinted)
+    # Páginas ABC selecionadas pelo usuário não devem ser removidas pela descoberta
+    discovered = discover_budget_pages(
+        pdf_path,
+        hint_pages=hinted,
+        allow_abc_hints=bool(abc_ready_tables),
+    )
     pages_for_pipeline = discovered or hinted
+    if abc_ready_tables:
+        # Garante que as páginas selecionadas entrem no pipeline
+        for p in hinted:
+            if p not in pages_for_pipeline:
+                pages_for_pipeline.append(p)
+        pages_for_pipeline = sorted(pages_for_pipeline)
     logger.info(
         "[process_selected] páginas hint=%s descobertas=%s → pipeline=%s",
         [p + 1 for p in hinted],
@@ -639,6 +949,8 @@ async def process_selected_tables(
         [p + 1 for p in pages_for_pipeline],
     )
 
+    pipeline = None
+    pipeline_error: str | None = None
     try:
         pipeline = run_pipeline(
             pdf_path,
@@ -648,15 +960,107 @@ async def process_selected_tables(
             auto_discover_pages=True,
         )
     except PipelineRejectedError as exc:
-        detail = str(exc)
-        logger.error("[process_selected] pipeline rejeitado: %s", detail)
+        pipeline_error = str(exc)
+        logger.error("[process_selected] pipeline rejeitado: %s", pipeline_error)
+        # Último recurso: tentar rows do cache mesmo sem perfil ABC
+        fallback_items: list[dict[str, Any]] = []
+        for tid in table_ids:
+            if selected_kinds.get(tid) in {"composicao", "analitico"}:
+                continue
+            cand = by_id[tid]
+            cand_rows = _resolve_rows(cand)
+            page = _candidate_page(cand)
+            parsed, diag = _diagnose_abc_row_parse(
+                cand_rows,
+                page=page,
+                table_id=tid,
+                profile_id=selected_profiles.get(tid),
+            )
+            extraction_diagnostics.append(diag)
+            fallback_items.extend(parsed)
+
+        if fallback_items:
+            classified = classify_abc_items(fallback_items)
+            classified = _attach_abc_document_divergences(classified)
+            abc_summary = build_abc_summary(classified)
+            finance_validation = _build_finance_validation_from_items(classified)
+            for t in tables_out:
+                if not t.get("skipped_for_abc"):
+                    t["items_parsed"] = len(
+                        [
+                            i
+                            for i in classified
+                            if int(i.get("pagina") or i.get("_source_page") or 0)
+                            == int(t["page"])
+                        ]
+                    )
+            return {
+                "status": "success",
+                "upload_id": upload_id,
+                "filename": filename,
+                "tables_found": len(tables_out),
+                "items_found": len(classified),
+                "analysis_types": analysis_types,
+                "engine": "cached_rows_fallback",
+                "pages_processed": sorted({int(t["page"]) for t in tables_out}),
+                "document_kind": "orcamento",
+                "estimativo_meta": {},
+                "tables": [
+                    {k: v for k, v in t.items() if k != "rows"} for t in tables_out
+                ],
+                "items": classified,
+                "structured_items": classified,
+                "hierarchical_items": classified,
+                "resumo": {
+                    "total_items": abc_summary.get("total_items") or len(classified),
+                    "valor_total": abc_summary.get("total_value") or 0,
+                    "metodo": "cached_rows_fallback",
+                    "analysis_types": analysis_types,
+                    "abc": abc_summary,
+                    "quarantine_count": abc_summary.get("quarantine_count") or 0,
+                    "validacao_financeira": finance_validation,
+                    "insights": "",
+                    "document_kind": "orcamento",
+                    "estimativo_meta": {},
+                },
+                "abc_summary": abc_summary,
+                "validacao_financeira": finance_validation,
+                "extraction_diagnostics": extraction_diagnostics,
+                "ia_metadata": {
+                    "tables_processed": len(tables_out),
+                    "pages_processed": sorted({int(t["page"]) for t in tables_out}),
+                    "document_kind": "orcamento",
+                    "details": extraction_diagnostics,
+                    "engine_used": "cached_rows_fallback",
+                    "pipeline_error": pipeline_error,
+                    "abc_algorithm": "pareto_after_item_80_95",
+                    "extraction_pipeline": "detect→header_aliases→fallback",
+                    "openai_role": "insights_only",
+                },
+                "message": (
+                    f"{len(classified)} item(ns) via fallback de rows "
+                    f"(pipeline: {pipeline_error}) — {', '.join(analysis_types)}."
+                ),
+            }
+
+        # Monta diagnóstico útil para a UI
+        primary = ""
+        if extraction_diagnostics:
+            primary = str(
+                extraction_diagnostics[0].get("primary_reject_reason") or ""
+            )
         raise HTTPException(
             status_code=400,
             detail={
-                "message": detail,
+                "message": pipeline_error,
+                "user_message": (
+                    "Tabela encontrada, mas nenhuma linha pôde ser convertida em item."
+                    + (f" Motivo principal: {primary}." if primary else "")
+                ),
                 "validacao_financeira": (
                     exc.result.validation.to_dict() if exc.result else {}
                 ),
+                "extraction_diagnostics": extraction_diagnostics,
                 "engine": "budget_pipeline_5_engines",
             },
         ) from exc
@@ -690,7 +1094,7 @@ async def process_selected_tables(
             )
 
     # Insights OpenAI (opcional) — só JSON, nunca PDF
-    insights: dict[str, Any] = {"ok": False, "texto": "", "skipped": True}
+    insights = {"ok": False, "texto": "", "skipped": True}
     if is_openai_configured():
         insights = await generate_insights_from_structured_json(
             {
@@ -750,22 +1154,23 @@ async def process_selected_tables(
         "pages_processed": pages_processed_1based,
         "document_kind": pipeline.document_kind,
         "estimativo_meta": pipeline.estimativo_meta or {},
-        "tables": tables_out,
+        "tables": [{k: v for k, v in t.items() if k != "rows"} for t in tables_out],
         "items": classified,
         "structured_items": hierarchical if isinstance(hierarchical, list) else classified,
         "hierarchical_items": hierarchical if isinstance(hierarchical, list) else classified,
         "resumo": resumo,
         "abc_summary": abc_summary,
         "validacao_financeira": finance_validation,
+        "extraction_diagnostics": extraction_diagnostics,
         "ia_metadata": {
             "tables_processed": len([t for t in tables_out if not t.get("skipped_for_abc")]),
             "pages_processed": pages_processed_1based,
             "document_kind": pipeline.document_kind,
             "estimativo_meta": pipeline.estimativo_meta or {},
-            "details": pipeline.engine_logs,
+            "details": pipeline.engine_logs + extraction_diagnostics,
             "model": insights.get("model"),
             "engine_used": "budget_pipeline_5_engines",
-            "abc_algorithm": "pareto_before_item_80_95",
+            "abc_algorithm": "pareto_after_item_80_95",
             "extraction_pipeline": "layout→table→validator→normalizer→analytics",
             "openai_role": "insights_only",
             "insights_ok": bool(insights.get("ok")),

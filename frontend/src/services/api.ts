@@ -159,6 +159,7 @@ const formatApiDetail = (detail: unknown, fallback: string): string => {
   }
   if (detail && typeof detail === "object") {
     const obj = detail as {
+      user_message?: string;
       message?: string;
       validacao_financeira?: {
         alertas?: string[];
@@ -168,7 +169,8 @@ const formatApiDetail = (detail: unknown, fallback: string): string => {
       };
     };
     const parts: string[] = [];
-    if (obj.message) parts.push(obj.message);
+    if (obj.user_message) parts.push(obj.user_message);
+    else if (obj.message) parts.push(obj.message);
     const vf = obj.validacao_financeira;
     if (vf) {
       const alerts = [
@@ -897,6 +899,7 @@ export const processOrcamentoTables = async (
       resumo: Record<string, unknown>;
       abc_summary?: Record<string, unknown>;
       validacao_financeira?: Record<string, unknown>;
+      extraction_diagnostics?: unknown[];
       ia_metadata?: Record<string, unknown>;
       message: string;
     };

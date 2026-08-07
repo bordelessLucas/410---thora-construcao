@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.domain.profiles.adapters import (
     parse_bdi_coluna,
+    parse_curva_abc,
     parse_generico,
     parse_novacap_planilha,
     parse_novacap_sintetico,
@@ -130,7 +131,43 @@ GENERICO = DocumentProfile(
     parse_rows=parse_generico,
 )
 
+CURVA_ABC = DocumentProfile(
+    id="curva_abc",
+    name="Curva ABC de Serviços (pronta)",
+    table_kind="orcamento",
+    economic_source="total",
+    preferred_for_abc=True,
+    prefer_leaf_only=True,
+    detect_hints=(
+        "curva abc",
+        "curva abc de serviços",
+        "curva abc de servicos",
+        "custo parcial",
+        "% incid",
+        "% acumul",
+        "faixa",
+    ),
+    header_tokens=(
+        "código",
+        "codigo",
+        "descri",
+        "quant",
+        "custo unit",
+        "custo parcial",
+        "incid",
+        "acumul",
+        "faixa",
+    ),
+    ia_layout_hint=(
+        "Curva ABC pronta: Código|Descrição|Unid|Quantidade|Custo Unit|Custo Parcial|"
+        "% Incid|% Acumul|Faixa. Use Custo Parcial como valor total da linha."
+    ),
+    parse_rows=parse_curva_abc,
+    metadata={"document_form": "abc_ready"},
+)
+
 ALL_PROFILES: tuple[DocumentProfile, ...] = (
+    CURVA_ABC,
     NOVACAP_SINTETICO,
     NOVACAP_PLANILHA,
     BDI_COLUNA,

@@ -23,11 +23,16 @@ class BudgetParser:
         'qtde. máxima', 'qtde máxima', 'qtde maxima', 'qtde. maxima',
     ]
     UNIDADE_KEYWORDS = ['un', 'und', 'unid', 'unidade', 'unit', 'u.', 'unid.']
+    # Evitar 'unit' solto — colide com UNID / "custo unit"
     VALOR_KEYWORDS = [
-        'valor', 'price', 'preço', 'preco', 'unitário', 'unitario', 'unit', 'v.unit',
+        'valor', 'price', 'preço', 'preco', 'unitário', 'unitario', 'v.unit',
         'preço unit', 'preco unit', 'p. unit', 'p.unit', 'valor unit',
+        'custo unit', 'custo unitário', 'custo unitario',
     ]
-    TOTAL_KEYWORDS = ['total', 'v.total', 'valor total', 'amount', 'preço total', 'preco total']
+    TOTAL_KEYWORDS = [
+        'total', 'v.total', 'valor total', 'amount', 'preço total', 'preco total',
+        'custo parcial', 'parcial',
+    ]
     CODIGO_KEYWORDS = ['código', 'codigo', 'code', 'ref', 'referência', 'referencia']
     ITEM_NUMERO_KEYWORDS = ['item', 'item n', 'nº item', 'n° item', 'nº', 'n°']
     BANCO_KEYWORDS = ['fonte', 'banco', 'base', 'origem', 'tabela']
@@ -35,6 +40,18 @@ class BudgetParser:
     BDI_KEYWORDS = ['bdi %', '% bdi', 'bdi%', 'bdi (%)', '%bdi']
     BDI_STANDALONE = ('bdi', 'b.d.i', 'b.d.i.')
     PESO_KEYWORDS = ['peso', 'peso (%)', '% peso', 'particip', 'participação']
+    # Curva ABC já pronta no PDF
+    CUSTO_UNIT_KEYWORDS = [
+        'custo unit', 'custo unitário', 'custo unitario', 'custo unit.',
+    ]
+    CUSTO_PARCIAL_KEYWORDS = ['custo parcial', 'parcial']
+    PCT_INCID_KEYWORDS = [
+        '% incid', 'incid', '% incidência', '% incidencia', 'incidência', 'incidencia',
+    ]
+    PCT_ACUMUL_KEYWORDS = [
+        '% acumul', 'acumul', '% acumulado', 'acumulado',
+    ]
+    FAIXA_KEYWORDS = ['faixa', 'classe abc', 'classificação abc', 'classificacao abc']
     
     # Palavras para ignorar (linhas de totalizações)
     IGNORE_KEYWORDS = [
@@ -59,6 +76,234 @@ class BudgetParser:
             return bool(re.search(rf"\b{re.escape(keyword)}\b", text))
         return keyword in text
     
+    @staticmethod
+    def sanitize_abc_economics(
+        quantidade: float,
+        valor_unitario: float,
+        valor_total: float,
+    ) -> tuple[float, float, float]:
+        """
+        Corrige confusão clássica quantidade → total em Curva ABC.
+
+        Se o "total" for igual à quantidade e Qtd×VU divergir, usa Qtd×VU
+        (custo parcial). Se parcial ausente e houver Qtd×VU, completa o total.
+        """
+        qtd = float(quantidade or 0)
+        vu = float(valor_unitario or 0)
+        vt = float(valor_total or 0)
+        if qtd > 0 and vu > 0:
+            expected = qtd * vu
+            if vt <= 0:
+                return qtd, vu, expected
+            # VT colado na quantidade (ex.: 100000 virando R$ 100000)
+            if abs(vt - qtd) <= max(0.01, abs(qtd) * 1e-9) and abs(expected - vt) > max(
+                1.0, abs(expected) * 0.02
+            ):
+                return qtd, vu, expected
+            # VU parece ter recebido a quantidade (VU≈QTD e total pequeno/% )
+            if abs(vu - qtd) <= max(0.01, abs(qtd) * 1e-9) and vt > 0 and vt < qtd:
+                # total parece parcial real; VU deve ser vt/qtd
+                return qtd, (vt / qtd if qtd else vu), vt
+            return qtd, vu, vt
+        if vt > 0 and qtd > 0 and vu <= 0:
+            return qtd, vt / qtd, vt
+        return qtd, vu, vt
+
+    def _is_description_continuation(self, descricao: str) -> bool:
+        """True só para fragmentos óbvios de continuação de texto (não novo serviço)."""
+        desc = (descricao or "").strip()
+        if not desc:
+            return False
+        if desc[0].islower():
+            return True
+        if desc[0] in "-–—/,.;":
+            return True
+        # Fragmento curto em caixa mista (ex.: "adaptado)")
+        letters = re.sub(r"[^A-Za-zÀ-ÿ]", "", desc)
+        if len(desc) < 12 and letters and desc != desc.upper():
+            return True
+        return False
+
+    def _is_likely_new_abc_service_row(
+        self,
+        *,
+        codigo: str,
+        descricao: str,
+        quantidade: float,
+        valor_unitario: float,
+        valor_total: float,
+        faixa: str = "",
+    ) -> bool:
+        """True se a linha parece um novo serviço da Curva ABC (não continuação de texto)."""
+        if codigo and self.looks_like_catalog_code(codigo):
+            return True
+        if float(valor_total or 0) > 0 or (
+            float(quantidade or 0) > 0 and float(valor_unitario or 0) > 0
+        ):
+            return True
+        fx = str(faixa or "").strip().upper()[:1]
+        if fx in {"A", "B", "C"}:
+            return True
+        desc = (descricao or "").strip()
+        if not desc:
+            return False
+        if self._is_description_continuation(desc):
+            return False
+        first = desc.split()[0]
+        if self.looks_like_catalog_code(first):
+            return True
+        letters = re.sub(r"[^A-Za-zÀ-ÿ]", "", desc)
+        # CAIXA ALTA típica de planilha ABC
+        if len(desc) >= 8 and letters and desc == desc.upper() and len(letters) >= 6:
+            return True
+        # Título de serviço (Title Case / inicia maiúscula) com 2+ palavras
+        words = [w for w in re.split(r"\s+", desc) if w]
+        if len(words) >= 2 and len(desc) >= 8 and desc[0].isupper():
+            return True
+        return False
+
+    def _looks_like_pure_number_cell(self, text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw or len(raw) > 24:
+            return False
+        if re.search(r"[A-Za-zÀ-ÿ]", raw):
+            return False
+        return self.parse_number(raw) > 0
+
+    def _realign_abc_shifted_description(
+        self,
+        *,
+        codigo: str,
+        descricao: str,
+        unidade: str,
+        quantidade: float,
+        valor_unitario: float,
+        valor_total: float,
+        row: List[Any],
+    ) -> tuple[str, str, str, float, float, float]:
+        """
+        Corrige deslocamento clássico: quantidade caiu na coluna DESCRIÇÃO
+        (ex.: '7.501,20' no lugar de 'Taxa de descarte…').
+        """
+        desc = (descricao or "").strip()
+        cod = (codigo or "").strip()
+        unid = (unidade or "").strip() or "un"
+
+        if desc and self._looks_like_pure_number_cell(desc):
+            qty_from_desc = self.parse_number(desc)
+            # Código longo = descrição real deslocada para a coluna código
+            if cod and not self.looks_like_catalog_code(cod) and len(cod) >= 8:
+                desc = cod
+                cod = ""
+            else:
+                # Busca texto de serviço nas células da linha
+                recovered_desc = ""
+                recovered_unit = ""
+                for cell in row:
+                    text = str(cell or "").strip()
+                    if not text or self._looks_like_pure_number_cell(text):
+                        continue
+                    if self.looks_like_catalog_code(text):
+                        if not cod:
+                            cod = text
+                        continue
+                    if re.fullmatch(r"[A-Za-z]{1,4}", text) and text.upper() in {
+                        "UN",
+                        "UNID",
+                        "M2",
+                        "M3",
+                        "M³",
+                        "M²",
+                        "KG",
+                        "T",
+                        "TB",
+                        "H",
+                        "HH",
+                        "VB",
+                        "CJ",
+                        "GL",
+                        "L",
+                        "M",
+                        "MES",
+                        "MÊS",
+                        "DIA",
+                        "KM",
+                    }:
+                        recovered_unit = text
+                        continue
+                    letters = re.sub(r"[^A-Za-zÀ-ÿ]", "", text)
+                    if len(letters) >= 8 and text not in {desc, cod}:
+                        recovered_desc = text
+                        break
+                if recovered_desc:
+                    desc = recovered_desc
+                else:
+                    desc = ""
+                if recovered_unit:
+                    unid = recovered_unit
+
+            if quantidade <= 0 and qty_from_desc > 0:
+                quantidade = qty_from_desc
+            elif (
+                quantidade > 0
+                and qty_from_desc > 0
+                and abs(quantidade - qty_from_desc) <= max(0.01, quantidade * 1e-9)
+            ):
+                pass  # quantidade já correta
+            if not desc:
+                desc = "(descrição deslocada — conferir PDF)"
+
+        # Unidade numérica / vazia com unidade real em outra célula
+        if unid.lower() in {"", "un", "0"} or self._looks_like_pure_number_cell(unid):
+            for cell in row:
+                text = str(cell or "").strip()
+                if re.fullmatch(
+                    r"(?i)m[²³23]|t|tb|kg|km|h|hh|vb|cj|gl|l|m|mes|mês|dia|unid?",
+                    text,
+                ):
+                    unid = text
+                    break
+
+        return cod, desc, unid, quantidade, valor_unitario, valor_total
+
+    def _recover_abc_amounts_from_row(
+        self, row: List[Any]
+    ) -> tuple[float, float, float] | None:
+        """
+        Recupera qtd/VU/total quando as colunas vieram desalinhadas.
+        Heurística: últimos números monetários da linha = parcial, unit, qtd.
+        """
+        nums: list[float] = []
+        for cell in row:
+            text = str(cell or "").strip()
+            if not text or "%" in text:
+                continue
+            if self.looks_like_catalog_code(text):
+                continue
+            if re.fullmatch(r"[A-Za-z]{1,4}", text):
+                continue
+            val = self.parse_number(text)
+            if val > 0:
+                nums.append(val)
+        if len(nums) < 1:
+            return None
+        # Preferência: ... qtd, vu, parcial (3 números) ou só parcial
+        if len(nums) >= 3:
+            qtd, vu, vt = nums[-3], nums[-2], nums[-1]
+            # Se o "vu" parece total e "vt" parece %, já filtramos %; ok
+            if vt >= qtd and vu < vt:
+                return qtd, vu, vt
+            if abs(qtd * vu - vt) <= max(0.05, vt * 0.02):
+                return qtd, vu, vt
+            # Último é o parcial canônico
+            return 0.0, 0.0, nums[-1]
+        if len(nums) == 2:
+            a, b = nums[0], nums[1]
+            if b > a and a > 0 and b / a > 2:
+                return a, b / a if a else 0.0, b
+            return 0.0, 0.0, max(a, b)
+        return 0.0, 0.0, nums[-1]
+
     def parse_number(self, value: Any) -> float:
         """Converte string em número (formato BRL canônico)."""
         from app.domain.money import parse_brl
@@ -72,6 +317,9 @@ class BudgetParser:
         # Linha de item hierárquico nunca é cabeçalho
         first = str(row[0]).strip() if row else ""
         if self.looks_like_item_number(first):
+            return False
+        # Código de catálogo (SINAPI) na 1ª coluna = linha de dados, não cabeçalho
+        if self.looks_like_catalog_code(first):
             return False
         
         # Converte para texto minúsculo
@@ -88,6 +336,10 @@ class BudgetParser:
             + self.ITEM_NUMERO_KEYWORDS
             + self.BANCO_KEYWORDS
             + self.BDI_KEYWORDS
+            + self.CUSTO_PARCIAL_KEYWORDS
+            + self.PCT_INCID_KEYWORDS
+            + self.PCT_ACUMUL_KEYWORDS
+            + self.FAIXA_KEYWORDS
         )
 
         for keyword in all_keywords:
@@ -98,10 +350,13 @@ class BudgetParser:
         has_qtd = any(self._keyword_in_text(k, row_text) for k in self.QUANTIDADE_KEYWORDS)
         has_desc = any(self._keyword_in_text(k, row_text) for k in self.DESCRICAO_KEYWORDS)
         has_val = any(self._keyword_in_text(k, row_text) for k in self.VALOR_KEYWORDS)
+        has_parcial = any(k in row_text for k in self.CUSTO_PARCIAL_KEYWORDS)
 
-        if has_codigo and (has_qtd or has_desc or has_val):
+        if self.is_abc_header_row(row):
             return True
-        if has_desc and (has_qtd or has_val):
+        if has_codigo and (has_qtd or has_desc or has_val or has_parcial):
+            return True
+        if has_desc and (has_qtd or has_val or has_parcial):
             return True
         return keyword_count >= 3
     
@@ -139,7 +394,39 @@ class BudgetParser:
             'valor_total_sem_bdi': -1,
             'valor_total_com_bdi': -1,
             'bdi': -1,
+            'pct_incid': -1,
+            'pct_acumul': -1,
+            'faixa': -1,
         }
+
+    @staticmethod
+    def looks_like_catalog_code(value: Any) -> bool:
+        """Código de catálogo (SINAPI/SICRO): 93370, 92394-ADAPTADO, AD 04.20.0050."""
+        text = str(value or "").strip()
+        if not text or len(text) > 40:
+            return False
+        if re.fullmatch(r"\d{4,}(?:-\s*[A-Za-zÀ-ÿ0-9._/-]+)?", text):
+            return True
+        if re.fullmatch(r"[A-Za-z]{1,4}\s*\d{2,}(?:[.\-/]\d+)*", text):
+            return True
+        if re.fullmatch(r"\d{4,}-\s*", text):
+            return True
+        return False
+
+    def is_abc_header_row(self, row: List[Any]) -> bool:
+        """Cabeçalho típico de Curva ABC pronta (código + custo parcial + faixa/%)."""
+        if not row:
+            return False
+        row_text = " ".join(str(cell).lower() for cell in row if cell)
+        has_codigo = any(self._keyword_in_text(k, row_text) for k in self.CODIGO_KEYWORDS)
+        has_parcial = any(k in row_text for k in self.CUSTO_PARCIAL_KEYWORDS)
+        has_faixa_or_pct = (
+            any(k in row_text for k in self.FAIXA_KEYWORDS)
+            or any(k in row_text for k in self.PCT_INCID_KEYWORDS)
+            or any(k in row_text for k in self.PCT_ACUMUL_KEYWORDS)
+        )
+        has_custo_unit = any(k in row_text for k in self.CUSTO_UNIT_KEYWORDS)
+        return bool(has_codigo and (has_parcial or (has_custo_unit and has_faixa_or_pct)))
 
     def looks_like_item_number(self, value: Any) -> bool:
         """Aceita 1, 1.1, 1.1.2… (regex do pipeline por coordenadas)."""
@@ -639,18 +926,43 @@ class BudgetParser:
                     qty_plain = idx
 
             if structure['unidade'] == -1:
-                for keyword in self.UNIDADE_KEYWORDS:
-                    if keyword in cell_lower:
-                        structure['unidade'] = idx
-                        break
+                # Não mapear "CUSTO UNIT" / "VALOR UNIT" como unidade
+                if "custo" in cell_lower or "valor" in cell_lower or "preço" in cell_lower or "preco" in cell_lower:
+                    pass
+                elif cell_lower in ("un", "und", "unid", "unid.", "unidade", "u.", "unit"):
+                    structure['unidade'] = idx
+                else:
+                    for keyword in ("unidade", "unid.", "unid"):
+                        if keyword == cell_lower or cell_lower.startswith(keyword):
+                            structure['unidade'] = idx
+                            break
 
             if structure['valor_unitario'] == -1:
-                for keyword in self.VALOR_KEYWORDS:
-                    if keyword in cell_lower and 'total' not in cell_lower:
+                for keyword in self.CUSTO_UNIT_KEYWORDS:
+                    if keyword in cell_lower:
                         structure['valor_unitario'] = idx
                         break
+                if structure['valor_unitario'] == -1:
+                    for keyword in self.VALOR_KEYWORDS:
+                        if (
+                            keyword in cell_lower
+                            and 'total' not in cell_lower
+                            and 'parcial' not in cell_lower
+                        ):
+                            # Evita "UNID" bater em keyword residual
+                            if cell_lower in ("un", "und", "unid", "unid.", "unidade", "u.", "unit"):
+                                continue
+                            structure['valor_unitario'] = idx
+                            break
 
-            if 'total' in cell_lower and 'peso' not in cell_lower:
+            # CUSTO PARCIAL = valor total da linha (não confundir com unitário)
+            if any(k in cell_lower for k in self.CUSTO_PARCIAL_KEYWORDS):
+                if structure.get('valor_total_sem_bdi', -1) == -1:
+                    structure['valor_total_sem_bdi'] = idx
+                if structure.get('valor_total', -1) == -1:
+                    structure['valor_total'] = idx
+
+            if 'total' in cell_lower and 'peso' not in cell_lower and 'parcial' not in cell_lower:
                 is_com_bdi = any(kw in cell_lower for kw in self.TOTAL_COM_BDI_KEYWORDS)
                 if is_com_bdi or ('bdi' in cell_lower and ('c/' in cell_lower or 'com ' in cell_lower)):
                     structure['valor_total_com_bdi'] = idx
@@ -660,6 +972,28 @@ class BudgetParser:
             # "Valor Unit com BDI" é preço unitário, não total
             if structure['valor_unitario'] == -1 and 'valor unit' in cell_lower and 'total' not in cell_lower:
                 structure['valor_unitario'] = idx
+
+            if structure.get('pct_incid', -1) == -1:
+                for keyword in self.PCT_INCID_KEYWORDS:
+                    if keyword in cell_lower and 'acumul' not in cell_lower:
+                        structure['pct_incid'] = idx
+                        break
+
+            if structure.get('pct_acumul', -1) == -1:
+                for keyword in self.PCT_ACUMUL_KEYWORDS:
+                    if keyword in cell_lower:
+                        structure['pct_acumul'] = idx
+                        break
+
+            if structure.get('faixa', -1) == -1:
+                cell_stripped = cell_lower.strip()
+                if cell_stripped in ("faixa", "classe", "classe abc", "abc"):
+                    structure['faixa'] = idx
+                else:
+                    for keyword in self.FAIXA_KEYWORDS:
+                        if keyword in cell_lower and len(cell_stripped) <= 24:
+                            structure['faixa'] = idx
+                            break
 
         if qty_plain >= 0:
             structure['quantidade'] = qty_plain
@@ -770,6 +1104,9 @@ class BudgetParser:
                     "valor_total",
                     "valor_total_sem_bdi",
                     "valor_total_com_bdi",
+                    "pct_incid",
+                    "pct_acumul",
+                    "faixa",
                 )
                 if candidate.get(key, -1) >= 0
             )
@@ -777,6 +1114,10 @@ class BudgetParser:
             if "descri" in row_l:
                 score += 2
             if "item" in row_l and ("código" in row_l or "codigo" in row_l):
+                score += 2
+            if "custo parcial" in row_l or "custo unit" in row_l:
+                score += 3
+            if "faixa" in row_l or "% incid" in row_l or "incid" in row_l:
                 score += 2
             if "obra bancos" in row_l or "encargos sociais" in row_l:
                 score -= 5
@@ -786,8 +1127,17 @@ class BudgetParser:
                 best_header_score = score
                 header_idx = idx
                 structure = candidate
+        # Cabeçalho ABC: score 5+ com custo parcial já é forte
         # Cabeçalho fraco (ex.: linha de dados com "descrição" longa) não conta
-        if header_idx >= 0 and best_header_score < 5:
+        min_header_score = 4 if (
+            structure.get("valor_total", -1) >= 0
+            and structure.get("codigo", -1) >= 0
+            and (
+                structure.get("faixa", -1) >= 0
+                or structure.get("pct_incid", -1) >= 0
+            )
+        ) else 5
+        if header_idx >= 0 and best_header_score < min_header_score:
             logger.info(
                 "📋 Cabeçalho fraco ignorado (score=%s) na linha %s",
                 best_header_score,
@@ -892,6 +1242,26 @@ class BudgetParser:
                     # Coluna BDI colidiu com VU — descartar BDI falso
                     bdi = 0.0
 
+                pct_incid = (
+                    self.parse_number(row[active_structure['pct_incid']])
+                    if active_structure.get('pct_incid', -1) >= 0
+                    and active_structure['pct_incid'] < len(row)
+                    else None
+                )
+                pct_acumul = (
+                    self.parse_number(row[active_structure['pct_acumul']])
+                    if active_structure.get('pct_acumul', -1) >= 0
+                    and active_structure['pct_acumul'] < len(row)
+                    else None
+                )
+                faixa = (
+                    self._cell_text(row, active_structure['faixa'])
+                    if active_structure.get('faixa', -1) >= 0
+                    else ""
+                )
+                if faixa:
+                    faixa = faixa.strip().upper()[:1] if faixa.strip()[:1].upper() in "ABC" else faixa.strip().upper()
+
                 novacap = (
                     self.try_parse_sintetico_row(row)
                     or self.try_parse_novacap_row(row)
@@ -924,31 +1294,209 @@ class BudgetParser:
                     valor_unitario = float(merged.get("valor_unitario") or 0)
                     valor_total = float(merged.get("valor_total") or 0)
 
-                if not descricao or len(descricao) < 3:
+                # Continuidade: código partido "92394-" + próxima linha "ADAPTADO"
+                if items and codigo and not descricao:
+                    prev = items[-1]
+                    prev_code = str(prev.get("codigo") or "")
+                    if prev_code.endswith("-") or (
+                        self.looks_like_catalog_code(prev_code)
+                        and not self.looks_like_catalog_code(codigo)
+                        and valor_total <= 0
+                        and quantidade <= 0
+                    ):
+                        prev["codigo"] = f"{prev_code}{codigo}".replace("--", "-")
+                        continue
+
+                has_amounts = (
+                    float(valor_total or 0) > 0
+                    or (
+                        float(quantidade or 0) > 0
+                        and float(valor_unitario or 0) > 0
+                    )
+                )
+                has_desc = bool(descricao and len(descricao.strip()) >= 3)
+
+                # Linha só de valores: completa o último item ainda sem custo parcial
+                if items and has_amounts and not has_desc and not codigo:
+                    prev = items[-1]
+                    q, vu, vt = self.sanitize_abc_economics(
+                        quantidade, valor_unitario, valor_total
+                    )
+                    resolved = vt if vt > 0 else (q * vu if q > 0 and vu > 0 else 0.0)
+                    if float(prev.get("valor_total") or 0) <= 0 and resolved > 0:
+                        prev["quantidade"] = q or prev.get("quantidade") or 0
+                        prev["valor_unitario"] = vu or prev.get("valor_unitario") or 0
+                        prev["valor_total"] = resolved
+                        if unidade and unidade != "un":
+                            prev["unidade"] = unidade
+                        if faixa:
+                            prev["doc_faixa"] = faixa
+                        if pct_incid is not None and pct_incid > 0:
+                            prev["doc_percentual"] = pct_incid
+                        if pct_acumul is not None and pct_acumul > 0:
+                            prev["doc_acumulado"] = pct_acumul
+                        continue
+                    if resolved > 0:
+                        # Valores órfãos (descrição foi fundida/perdida) — não descartar $$
+                        orphan = {
+                            "id": f"item_{page}_{idx}",
+                            "item_numero": item_numero,
+                            "item": item_numero,
+                            "banco": banco,
+                            "codigo": "",
+                            "descricao": "(serviço sem descrição — valores recuperados)",
+                            "quantidade": q,
+                            "unidade": unidade or "un",
+                            "bdi": bdi,
+                            "valor_unitario": vu,
+                            "valor_total": resolved,
+                            "status": "validado",
+                            "origem": f"página {page}, linha {idx}",
+                        }
+                        if faixa:
+                            orphan["doc_faixa"] = faixa
+                        if pct_incid is not None and pct_incid > 0:
+                            orphan["doc_percentual"] = pct_incid
+                        if pct_acumul is not None and pct_acumul > 0:
+                            orphan["doc_acumulado"] = pct_acumul
+                        items.append(orphan)
+                        continue
+
+                # Continuação de descrição: fundir SÓ fragmentos óbvios; títulos = novo serviço
+                if (
+                    items
+                    and not codigo
+                    and has_desc
+                    and not has_amounts
+                ):
+                    if self._is_description_continuation(descricao) and not self._is_likely_new_abc_service_row(
+                        codigo="",
+                        descricao=descricao,
+                        quantidade=quantidade,
+                        valor_unitario=valor_unitario,
+                        valor_total=valor_total,
+                        faixa=faixa,
+                    ):
+                        prev = items[-1]
+                        prev["descricao"] = f"{prev.get('descricao', '')} {descricao}".strip()
+                        continue
+
+                if not has_desc and not (codigo and self.looks_like_catalog_code(codigo)):
                     continue
 
-                if quantidade <= 0 and valor_unitario <= 0 and valor_total <= 0:
+                if not has_amounts:
+                    # Tentativa: números na própria linha (PDF desalinhado)
+                    recovered = self._recover_abc_amounts_from_row(row)
+                    if recovered:
+                        quantidade, valor_unitario, valor_total = recovered
+                        has_amounts = True
+                    elif self._is_likely_new_abc_service_row(
+                        codigo=codigo,
+                        descricao=descricao,
+                        quantidade=0,
+                        valor_unitario=0,
+                        valor_total=0,
+                        faixa=faixa,
+                    ) or (codigo and self.looks_like_catalog_code(codigo)):
+                        # Novo serviço sem $$ nesta linha — aguarda linha só de valores
+                        quantidade, valor_unitario, valor_total = 0.0, 0.0, 0.0
+                    else:
+                        continue
+
+                quantidade, valor_unitario, valor_total = self.sanitize_abc_economics(
+                    quantidade, valor_unitario, valor_total
+                )
+
+                resolved_total = (
+                    valor_total
+                    if valor_total > 0
+                    else (
+                        quantidade * valor_unitario
+                        if quantidade > 0 and valor_unitario > 0
+                        else 0.0
+                    )
+                )
+                # Aceita item incompleto (vt=0) só se for novo serviço ABC tipado
+                if resolved_total <= 0 and not (
+                    self._is_likely_new_abc_service_row(
+                        codigo=codigo,
+                        descricao=descricao,
+                        quantidade=0,
+                        valor_unitario=0,
+                        valor_total=0,
+                        faixa=faixa,
+                    )
+                    or (codigo and self.looks_like_catalog_code(codigo))
+                ):
                     continue
 
-                items.append({
+                if not codigo and descricao:
+                    first_tok = descricao.split()[0]
+                    if self.looks_like_catalog_code(first_tok):
+                        codigo = first_tok
+                        descricao = " ".join(descricao.split()[1:]).strip() or descricao
+
+                codigo, descricao, unidade, quantidade, valor_unitario, valor_total = (
+                    self._realign_abc_shifted_description(
+                        codigo=codigo,
+                        descricao=descricao,
+                        unidade=unidade,
+                        quantidade=quantidade,
+                        valor_unitario=valor_unitario,
+                        valor_total=valor_total,
+                        row=row,
+                    )
+                )
+                quantidade, valor_unitario, valor_total = self.sanitize_abc_economics(
+                    quantidade, valor_unitario, valor_total
+                )
+                resolved_total = (
+                    valor_total
+                    if valor_total > 0
+                    else (
+                        quantidade * valor_unitario
+                        if quantidade > 0 and valor_unitario > 0
+                        else resolved_total
+                    )
+                )
+
+                item_payload = {
                     'id': f'item_{page}_{idx}',
                     'item_numero': item_numero,
                     'item': item_numero,
                     'banco': banco,
                     'codigo': codigo,
-                    'descricao': descricao,
+                    'descricao': descricao or codigo or "(sem descrição)",
                     'quantidade': quantidade,
                     'unidade': unidade,
                     'bdi': bdi,
                     'valor_unitario': valor_unitario,
-                    'valor_total': valor_total if valor_total > 0 else quantidade * valor_unitario,
+                    'valor_total': resolved_total,
                     'status': 'validado',
-                    'origem': f'página {page}, linha {idx}'
-                })
+                    'origem': f'página {page}, linha {idx}',
+                }
+                if pct_incid is not None and pct_incid > 0:
+                    item_payload['doc_percentual'] = pct_incid
+                if pct_acumul is not None and pct_acumul > 0:
+                    item_payload['doc_acumulado'] = pct_acumul
+                if faixa:
+                    item_payload['doc_faixa'] = faixa
+                items.append(item_payload)
             
             except (IndexError, ValueError, TypeError) as e:
                 logger.debug(f"Erro ao processar linha {idx}: {e}")
                 continue
+
+        # Descarta serviços incompletos que nunca receberam custo parcial
+        items = [
+            it
+            for it in items
+            if float(it.get("valor_total") or 0) > 0
+            or (
+                float(it.get("quantidade") or 0) > 0
+                and float(it.get("valor_unitario") or 0) > 0
+            )
+        ]
         
         logger.info(f"✅ Extraídos {len(items)} itens da página {page}")
         return items, structure

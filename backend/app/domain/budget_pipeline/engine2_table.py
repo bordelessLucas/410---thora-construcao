@@ -33,7 +33,14 @@ _BANK_RE = re.compile(
     re.IGNORECASE,
 )
 _HEADER_HINT_RE = re.compile(
-    r"(item|c[oó]digo|descri|quant|valor|total|unid|peso|banco|fonte)",
+    r"(item|c[oó]digo|descri|quant|valor|total|unid|peso|banco|fonte|custo|faixa|incid|acumul)",
+    re.IGNORECASE,
+)
+_CATALOG_CODE_RE = re.compile(
+    r"^(?:\d{4,}(?:-\s*[A-Za-zÀ-ÿ0-9._/-]+)?|[A-Za-z]{1,4}\s*\d{2,}(?:[.\-/]\d+)*|\d{4,}-\s*)$"
+)
+_ABC_HEADER_RE = re.compile(
+    r"custo\s+parcial|custo\s+unit|%\s*incid|%\s*acumul|\bfaixa\b",
     re.IGNORECASE,
 )
 _JUNK_LINE_RE = re.compile(
@@ -112,11 +119,15 @@ def group_elements_into_lines(
     return sorted(lines, key=lambda line: (line.page, line.y))
 
 
-def _is_item_start(text: str) -> bool:
+def _is_item_start(text: str, *, allow_catalog_code: bool = False) -> bool:
     """
     Aceita hierárquicos (1.1.1) e códigos simples (001) / seções (1..39).
+    Com allow_catalog_code (layout Curva ABC): também 93370 / 92394-ADAPTADO.
     Rejeita fragmentos de telefone (61, 92…) sem hierarquia.
     """
+    text = (text or "").strip()
+    if allow_catalog_code and _CATALOG_CODE_RE.match(text):
+        return True
     if not _ITEM_NUM_RE.match(text):
         return False
     if "." in text:
@@ -128,6 +139,22 @@ def _is_item_start(text: str) -> bool:
         # Seções / itens rasos típicos de orçamento BR
         return 1 <= int(text) <= 39
     return True
+
+
+def _page_has_abc_layout(lines: list[TextLine]) -> bool:
+    """Detecta cabeçalho de Curva ABC pronta nas primeiras linhas."""
+    for line in lines[:30]:
+        low = line.text.lower()
+        if _ABC_HEADER_RE.search(low) and (
+            "codigo" in low
+            or "código" in low
+            or "descri" in low
+        ):
+            return True
+        hits = len(_HEADER_HINT_RE.findall(low))
+        if hits >= 3 and ("custo parcial" in low or ("faixa" in low and "custo" in low)):
+            return True
+    return False
 
 
 def _looks_like_noise_row(text: str, cells: list[str] | None = None) -> bool:
@@ -203,7 +230,15 @@ def _page_width_hint(elements: list[TextElement]) -> float:
 def _is_header_line(text: str) -> bool:
     low = text.lower()
     hits = len(_HEADER_HINT_RE.findall(low))
-    return hits >= 3 and ("item" in low or "descri" in low)
+    if hits >= 3 and (
+        "item" in low
+        or "descri" in low
+        or "custo" in low
+        or "código" in low
+        or "codigo" in low
+    ):
+        return True
+    return bool(_ABC_HEADER_RE.search(low) and hits >= 2)
 
 
 def _is_title_line(text: str) -> bool:
@@ -225,10 +260,10 @@ def _is_junk_line(text: str) -> bool:
     return bool(_JUNK_LINE_RE.search(text))
 
 
-def _is_budget_item_line(line: TextLine) -> bool:
+def _is_budget_item_line(line: TextLine, *, allow_catalog_code: bool = False) -> bool:
     if not line.elements:
         return False
-    return _is_item_start(line.elements[0].text)
+    return _is_item_start(line.elements[0].text, allow_catalog_code=allow_catalog_code)
 
 
 def detect_column_boundaries(item_lines: list[TextLine]) -> list[float]:
@@ -794,32 +829,46 @@ def reconstruct_tables(
     Retorna (rows_validas_e_grupos, incomplete, meta).
     """
     lines = group_elements_into_lines(elements, y_tolerance=y_tolerance)
-    item_lines = [line for line in lines if _is_budget_item_line(line)]
+    abc_layout = _page_has_abc_layout(lines)
+    item_lines = [
+        line
+        for line in lines
+        if _is_budget_item_line(line, allow_catalog_code=abc_layout)
+    ]
     columns = detect_column_boundaries(item_lines) if len(item_lines) >= 3 else []
 
     rows: list[RawBudgetRow] = []
     incomplete: list[RawBudgetRow] = []
+    discard_reasons: dict[str, int] = {}
 
     for line in lines:
         text = line.text
         if not line.elements:
             continue
         first = line.elements[0].text
-        is_item = _is_item_start(first)
+        is_item = _is_item_start(first, allow_catalog_code=abc_layout)
         is_header = _is_header_line(text)
         is_title = _is_title_line(text)
 
         if _is_junk_line(text) and not is_item:
             line.kind = "junk"
+            discard_reasons["junk"] = discard_reasons.get("junk", 0) + 1
             continue
 
         if rows and not is_item and not is_header and not is_title:
             if _is_junk_line(text) or re.search(r"\d{1,3}(?:\.\d{3})+,\d{2}", text):
                 continue
-            # Continuação: só descrição da última linha de item/grupo
+            # Continuação: só descrição / sufixo de código da última linha
             last = rows[-1] if rows else None
             if last and last.kind in {"item", "group", "incomplete"}:
-                _merge_description_only(last, text)
+                # Merge código partido: "92394-" + "ADAPTADO"
+                tok = first.strip()
+                if last.codigo.endswith("-") and tok and not _looks_numeric_token(tok):
+                    last.codigo = f"{last.codigo}{tok}".replace("--", "-")
+                    if last.item_numero.endswith("-"):
+                        last.item_numero = last.codigo
+                else:
+                    _merge_description_only(last, text)
             continue
 
         if is_header or is_title:
@@ -827,6 +876,7 @@ def reconstruct_tables(
             continue
 
         if not is_item:
+            discard_reasons["no_item_start"] = discard_reasons.get("no_item_start", 0) + 1
             continue
 
         if columns:
@@ -844,12 +894,25 @@ def reconstruct_tables(
 
         if _looks_like_noise_row(text, cells):
             line.kind = "junk"
+            discard_reasons["noise"] = discard_reasons.get("noise", 0) + 1
             continue
 
         row = _parse_cells_to_row(cells, page=line.page)
+        # Layout ABC: 1ª coluna é código de catálogo, não item hierárquico
+        if abc_layout and _CATALOG_CODE_RE.match(first.strip()):
+            code = first.strip()
+            if not row.codigo or row.codigo == row.item_numero:
+                row.codigo = code
+            if not row.item_numero or row.item_numero == code or not _ITEM_NUM_RE.match(
+                row.item_numero
+            ):
+                row.item_numero = code
+            if row.valor_total > 0 and row.descricao and len(row.descricao) >= 3:
+                row.kind = "item"
+                row.incomplete_reason = ""
         if row.kind == "incomplete":
             incomplete.append(row)
-            # Grupos incompletos não entram; itens incompletos ficam só em incomplete
+            discard_reasons["incomplete"] = discard_reasons.get("incomplete", 0) + 1
             continue
         if row.kind in {"item", "group"}:
             rows.append(row)
@@ -877,6 +940,17 @@ def reconstruct_tables(
             row.kind = "item"
             row.incomplete_reason = ""
             recovered.append(row)
+        elif (
+            abc_layout
+            and row.descricao
+            and row.valor_total > 0
+            and (row.codigo or row.item_numero)
+        ):
+            row.kind = "item"
+            row.incomplete_reason = ""
+            if not row.codigo and row.item_numero:
+                row.codigo = row.item_numero
+            recovered.append(row)
         else:
             still_incomplete.append(row)
     economic.extend(recovered)
@@ -889,13 +963,17 @@ def reconstruct_tables(
         "economic_rows": len(economic),
         "incomplete_rows": len(still_incomplete),
         "y_tolerance": y_tolerance,
+        "abc_layout": abc_layout,
+        "discard_reasons": discard_reasons,
     }
     logger.info(
-        "[engine2] linhas=%s item_lines=%s cols=%s econômicos=%s incompletos=%s",
+        "[engine2] linhas=%s item_lines=%s cols=%s econômicos=%s incompletos=%s abc=%s discard=%s",
         len(lines),
         len(item_lines),
         len(columns),
         len(economic),
         len(still_incomplete),
+        abc_layout,
+        discard_reasons,
     )
     return economic, still_incomplete, meta

@@ -152,10 +152,6 @@ const mapStructuredItemsToValidation = (
       valor_total: Number(item.valor_total_com_bdi ?? item.valor_total ?? 0),
       valorTotalComBdi: Number(item.valor_total_com_bdi ?? item.valor_total ?? 0),
     });
-    if (tipo === "grupo" || description.toLowerCase().includes("total do grupo")) {
-      continue;
-    }
-
     const pricing = resolveStructuredItemPricing(item);
     const {
       qty,
@@ -169,6 +165,19 @@ const mapStructuredItemsToValidation = (
       confidence,
     } = pricing;
 
+    // Serviço precificado nunca é descartado como "grupo" (nº sequencial sem SINAPI)
+    let tipoFinal: typeof tipo = tipo;
+    if (
+      tipo === "grupo" &&
+      valorTotalComBdi > 0 &&
+      !description.toLowerCase().includes("total do grupo")
+    ) {
+      tipoFinal = "item";
+    }
+    if (tipoFinal === "grupo" || description.toLowerCase().includes("total do grupo")) {
+      continue;
+    }
+
     const backendClassification = (item as { classification?: string }).classification;
     const classification =
       backendClassification === "A" ||
@@ -180,7 +189,7 @@ const mapStructuredItemsToValidation = (
     mapped.push({
       id: ++id,
       item: itemNumero,
-      tipo,
+      tipo: tipoFinal,
       banco: String(item.banco ?? ""),
       code: itemNumero || codigoCatalogo || String(id).padStart(3, "0"),
       catalogCode: codigoCatalogo || undefined,
@@ -513,13 +522,46 @@ export default function ValidacaoOrcamento() {
         | StructuredBudgetItem[]
         | undefined;
 
-      if (Array.isArray(structuredItems) && structuredItems.length > 0) {
+      // Retorno da Curva ABC: state pode trazer items/editedItems no topo
+      const stateItemsFallback = (
+        (flowState as { items?: StructuredBudgetItem[]; editedItems?: StructuredBudgetItem[] } | null)
+          ?.items ??
+        (flowState as { editedItems?: StructuredBudgetItem[] } | null)?.editedItems
+      );
+
+      const itemsFromFlow =
+        Array.isArray(structuredItems) && structuredItems.length > 0
+          ? structuredItems
+          : Array.isArray(stateItemsFallback) && stateItemsFallback.length > 0
+            ? stateItemsFallback
+            : null;
+
+      if (itemsFromFlow) {
         const hierarchical =
           (flowState?.hierarchicalItems as unknown[] | undefined) ??
           (flowState?.structuredData?.hierarchicalItems as unknown[] | undefined) ??
-          structuredItems;
+          itemsFromFlow;
         setHierarchicalItems(hierarchical);
-        setItems(applyAbcToItems(mapStructuredItemsToValidation(structuredItems)));
+        setItems(applyAbcToItems(mapStructuredItemsToValidation(itemsFromFlow)));
+
+        // Se voltou da Curva ABC sem File em memória, tenta recuperar o PDF
+        if (!flowState?.file && resolvedUploadId) {
+          try {
+            const pdfBlob = await getOrcamentoPdf(resolvedUploadId);
+            if (pdfBlob) {
+              setPdfFile(
+                new File(
+                  [pdfBlob],
+                  (flowState?.filename as string | undefined) ?? `${resolvedUploadId}.pdf`,
+                  { type: "application/pdf" },
+                ),
+              );
+            }
+          } catch {
+            // PDF opcional na validação em memória
+          }
+        }
+
         setIsLoading(false);
         return;
       }
@@ -864,20 +906,31 @@ export default function ValidacaoOrcamento() {
   };
 
   const handleOpenCurvaAbc = () => {
-    const selected = items.filter((item) => item.selected);
-    const payload = selected.length > 0 ? selected : items.filter(isExecutivo);
+    // Curva ABC do documento = todos os itens com valor (reproduz o PDF)
+    const payload = items.filter(
+      (item) =>
+        (Number(item.lineTotal) > 0 || Number(item.valorTotalComBdi) > 0) &&
+        item.tipo !== "grupo" &&
+        !String(item.description || "").toLowerCase().includes("total do grupo"),
+    );
     if (payload.length === 0) {
       toast.warning("Nenhum item disponível", {
         description: "Processe o PDF ou adicione itens à planilha antes de abrir a Curva ABC.",
       });
       return;
     }
-    const uploadId = resolvedUploadId || "unknown";
+    const uploadId = resolvedUploadId || "upload";
     navigate(`/curva-abc/${uploadId}`, {
       state: {
         ...buildChildRouteState(),
         editedItems: buildItemExportPayload(payload),
         items: buildItemExportPayload(payload),
+        abcScope: "documento_completo",
+        orcamentoTotalItens: items.length,
+        orcamentoTotalValor: items.reduce(
+          (s, i) => s + (Number(i.lineTotal) || Number(i.valorTotalComBdi) || 0),
+          0,
+        ),
       },
     });
   };
@@ -1317,7 +1370,7 @@ export default function ValidacaoOrcamento() {
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
                 <div className="min-w-0 rounded-xl border border-blue-200 bg-white p-4 shadow-sm">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Total geral (c/ BDI)
+                    Total do orçamento
                   </p>
                   <p
                     className="mt-2 break-words text-base font-bold leading-snug tabular-nums text-blue-700 sm:text-lg"
@@ -1326,7 +1379,13 @@ export default function ValidacaoOrcamento() {
                     {formatMoneyFull(abcResumo.totalGeral)}
                   </p>
                   <p className="mt-1 text-xs text-slate-400">
-                    {items.filter(isExecutivo).length} itens executivos
+                    {items.filter(
+                      (item) =>
+                        (Number(item.lineTotal) > 0 ||
+                          Number(item.valorTotalComBdi) > 0) &&
+                        item.tipo !== "grupo",
+                    ).length}{" "}
+                    itens do documento
                   </p>
                 </div>
                 <div className="min-w-0 rounded-xl border border-red-200 bg-red-50/40 p-4 shadow-sm">
@@ -1451,9 +1510,47 @@ export default function ValidacaoOrcamento() {
               <div className="absolute inset-0 overflow-auto overscroll-contain pb-16">
               {items.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-slate-400">
-                  <div className="text-center">
+                  <div className="text-center max-w-md px-4">
                     <AlertCircle className="mx-auto mb-2 h-10 w-10 opacity-50" />
-                    <p>Nenhum item foi extraído do PDF.</p>
+                    <p className="font-medium text-slate-600">
+                      {Array.isArray(flowState?.selectedTableIds) &&
+                      flowState.selectedTableIds.length > 0
+                        ? "Tabela encontrada, mas nenhuma linha pôde ser convertida em item."
+                        : "Nenhum item foi extraído do PDF."}
+                    </p>
+                    {(() => {
+                      const diag = (
+                        flowState?.structuredData as
+                          | {
+                              extraction_diagnostics?: Array<{
+                                primary_reject_reason?: string;
+                                candidate_rows?: number;
+                                accepted_items?: number;
+                                rejected?: Record<string, number>;
+                              }>;
+                              ia_metadata?: { details?: unknown };
+                            }
+                          | undefined
+                      )?.extraction_diagnostics;
+                      const first = Array.isArray(diag) ? diag[0] : undefined;
+                      if (!first) return null;
+                      const rejectedTotal = first.rejected
+                        ? Object.values(first.rejected).reduce((a, b) => a + b, 0)
+                        : 0;
+                      return (
+                        <p className="mt-2 text-xs text-slate-500">
+                          {typeof first.candidate_rows === "number" && (
+                            <>
+                              {first.candidate_rows} linhas candidatas
+                              {rejectedTotal > 0 ? ` · ${rejectedTotal} rejeitadas` : ""}
+                              {first.primary_reject_reason
+                                ? ` · Motivo principal: ${first.primary_reject_reason}`
+                                : ""}
+                            </>
+                          )}
+                        </p>
+                      );
+                    })()}
                   </div>
                 </div>
               ) : (
