@@ -38,6 +38,7 @@ import {
   resolveTipoLinha,
   snapshotReferenciaOrcamento,
   calcularEconomia,
+  detectarDuplaContagemAbc,
 } from "../features/orcamentos/recalcularCurvaABC";
 import type { NovoOrcamentoFlowState } from "../features/orcamentos/outputModels";
 import { CURVA_ABC_ONLY } from "../features/orcamentos/outputModels";
@@ -167,15 +168,14 @@ const mapStructuredItemsToValidation = (
 
     // Serviço precificado nunca é descartado como "grupo" (nº sequencial sem SINAPI)
     let tipoFinal: typeof tipo = tipo;
-    if (
-      tipo === "grupo" &&
-      valorTotalComBdi > 0 &&
-      !description.toLowerCase().includes("total do grupo")
-    ) {
-      tipoFinal = "item";
-    }
-    if (tipoFinal === "grupo" || description.toLowerCase().includes("total do grupo")) {
+    // NÃO promover grupo→item só porque tem valor (causa dupla contagem na ABC:
+    // 10 + 10.1 + 10.2...). Grupos permanecem na planilha; a ABC usa só folhas.
+    if (description.toLowerCase().includes("total do grupo")) {
       continue;
+    }
+    // Mantém grupos na validação (não edita como serviço)
+    if (tipoFinal === "grupo") {
+      // ainda inclui na lista para hierarquia/visualização
     }
 
     const backendClassification = (item as { classification?: string }).classification;
@@ -230,9 +230,10 @@ const mapStoredItemsToValidation = (rawItems: unknown[]): ItemOrcamento[] => {
     const item = raw as Record<string, unknown>;
     const tipo = String(item.tipo ?? "item").toLowerCase();
     const description = String(item.descricao ?? item.description ?? "").trim();
-    if (tipo === "grupo" || description.toLowerCase().includes("total do grupo")) {
+    if (description.toLowerCase().includes("total do grupo")) {
       continue;
     }
+    // Mantém grupos na planilha; ABC filtra folhas via isExecutiveItem
 
     const qty = toNumber(item.quantidade ?? item.quantity ?? item.qty);
     const bdi = toBdiPercent(item.bdi);
@@ -319,9 +320,14 @@ function buildItemExportPayload(items: ItemOrcamento[]): Record<string, unknown>
     unit: item.unit,
     quantidade: item.qty,
     qty: item.qty,
-    valor_unitario: item.unitPrice,
-    unitPrice: item.unitPrice,
+    valor_unitario: item.valorUnitarioSemBdi ?? item.unitPrice,
+    valor_unitario_sem_bdi: item.valorUnitarioSemBdi ?? item.unitPrice,
+    valor_unitario_com_bdi: item.valorUnitarioComBdi ?? undefined,
+    unitPrice: item.valorUnitarioSemBdi ?? item.unitPrice,
+    unitPriceComBdi: item.valorUnitarioComBdi ?? undefined,
     valor_total: item.lineTotal,
+    valor_total_com_bdi: item.valorTotalComBdi ?? item.lineTotal,
+    valor_total_sem_bdi: item.valorTotalSemBdi ?? undefined,
     lineTotal: item.lineTotal,
     totalValue: item.lineTotal,
     bdi: item.bdi,
@@ -462,6 +468,29 @@ export default function ValidacaoOrcamento() {
       : [];
     return alertas;
   }, [flowState?.structuredData?.resumo]);
+
+  const totalOficialOrcamento = useMemo(() => {
+    const resumo = flowState?.structuredData?.resumo as
+      | {
+          valor_total?: number;
+          validacao_financeira?: {
+            total_geral?: {
+              total_geral_documento?: number;
+              soma_folhas?: number;
+            };
+          };
+        }
+      | undefined;
+    const doc = Number(
+      resumo?.validacao_financeira?.total_geral?.total_geral_documento || 0,
+    );
+    const valor = Number(resumo?.valor_total || 0);
+    return doc > 0 ? doc : valor > 0 ? valor : 0;
+  }, [flowState?.structuredData?.resumo]);
+
+  const duplaContagemAbc = useMemo(() => {
+    return detectarDuplaContagemAbc(abcResumo.totalGeral, totalOficialOrcamento);
+  }, [abcResumo.totalGeral, totalOficialOrcamento]);
 
   const estimativoMeta = useMemo(() => {
     const resumo = flowState?.structuredData?.resumo as
@@ -906,31 +935,57 @@ export default function ValidacaoOrcamento() {
   };
 
   const handleOpenCurvaAbc = () => {
-    // Curva ABC do documento = todos os itens com valor (reproduz o PDF)
-    const payload = items.filter(
-      (item) =>
-        (Number(item.lineTotal) > 0 || Number(item.valorTotalComBdi) > 0) &&
-        item.tipo !== "grupo" &&
-        !String(item.description || "").toLowerCase().includes("total do grupo"),
-    );
+    // Só folhas (sem filhos hierárquicos) — evita 10 + 10.1 + 10.2…
+    const payload = items.filter(isExecutivo);
     if (payload.length === 0) {
       toast.warning("Nenhum item disponível", {
         description: "Processe o PDF ou adicione itens à planilha antes de abrir a Curva ABC.",
       });
       return;
     }
+
+    const somaFolhas = payload.reduce(
+      (s, i) => s + (Number(i.lineTotal) || Number(i.valorTotalComBdi) || 0),
+      0,
+    );
+    const resumo = flowState?.structuredData?.resumo as
+      | {
+          valor_total?: number;
+          validacao_financeira?: {
+            total_geral?: {
+              total_geral_documento?: number;
+              soma_folhas?: number;
+            };
+          };
+        }
+      | undefined;
+    const totalOficial = Number(
+      resumo?.validacao_financeira?.total_geral?.total_geral_documento ||
+        resumo?.valor_total ||
+        0,
+    );
+    const check = detectarDuplaContagemAbc(somaFolhas, totalOficial);
+    if (!check.ok) {
+      toast.error("Possível dupla contagem na Curva ABC", {
+        description: `Soma das folhas (R$ ${somaFolhas.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}) supera o total oficial do orçamento (R$ ${totalOficial.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}). Grupos/subtotais podem estar misturados com serviços.`,
+        duration: 12000,
+      });
+    }
+
     const uploadId = resolvedUploadId || "upload";
     navigate(`/curva-abc/${uploadId}`, {
       state: {
         ...buildChildRouteState(),
         editedItems: buildItemExportPayload(payload),
         items: buildItemExportPayload(payload),
-        abcScope: "documento_completo",
+        abcScope: "folhas_hierarquia",
         orcamentoTotalItens: items.length,
         orcamentoTotalValor: items.reduce(
           (s, i) => s + (Number(i.lineTotal) || Number(i.valorTotalComBdi) || 0),
           0,
         ),
+        totalOficialOrcamento: totalOficial > 0 ? totalOficial : undefined,
+        somaFolhasAbc: somaFolhas,
       },
     });
   };
@@ -1318,6 +1373,20 @@ export default function ValidacaoOrcamento() {
             </div>
           )}
 
+          {!duplaContagemAbc.ok && (
+            <div className="shrink-0 border-b border-red-200 bg-red-50 px-4 py-3 sm:px-6">
+              <p className="text-xs font-semibold uppercase tracking-wide text-red-900">
+                Possível dupla contagem na Curva ABC
+              </p>
+              <p className="mt-1 text-sm text-red-900">
+                A soma dos serviços-folha ({formatMoneyFull(abcResumo.totalGeral)})
+                supera o total oficial do orçamento (
+                {formatMoneyFull(totalOficialOrcamento)}). Grupos ou subtotais
+                podem estar sendo somados junto com seus itens filhos.
+              </p>
+            </div>
+          )}
+
           {estimativoMeta && (
             <div className="shrink-0 border-b border-sky-200 bg-sky-50 px-4 py-3 sm:px-6">
               <p className="text-xs font-semibold uppercase tracking-wide text-sky-900">
@@ -1370,7 +1439,7 @@ export default function ValidacaoOrcamento() {
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
                 <div className="min-w-0 rounded-xl border border-blue-200 bg-white p-4 shadow-sm">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Total do orçamento
+                    Total das folhas (ABC)
                   </p>
                   <p
                     className="mt-2 break-words text-base font-bold leading-snug tabular-nums text-blue-700 sm:text-lg"
@@ -1379,13 +1448,8 @@ export default function ValidacaoOrcamento() {
                     {formatMoneyFull(abcResumo.totalGeral)}
                   </p>
                   <p className="mt-1 text-xs text-slate-400">
-                    {items.filter(
-                      (item) =>
-                        (Number(item.lineTotal) > 0 ||
-                          Number(item.valorTotalComBdi) > 0) &&
-                        item.tipo !== "grupo",
-                    ).length}{" "}
-                    itens do documento
+                    {items.filter(isExecutivo).length} serviços-folha ·{" "}
+                    {items.length} linhas na planilha
                   </p>
                 </div>
                 <div className="min-w-0 rounded-xl border border-red-200 bg-red-50/40 p-4 shadow-sm">

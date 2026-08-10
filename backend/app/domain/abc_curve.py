@@ -153,10 +153,11 @@ def infer_tipo_linha(
         return "item"
     if is_xyz and (valor_total > 0 or (quantidade > 0 and valor_unitario > 0)):
         return "item"
-    # Curva ABC: tipagem explícita "item" + financeiro prevalece sobre nº sequencial 1..N
+    # X / X.Y sem catálogo = agregador (10, 10.2, 14…) — mesmo com total
+    if is_group_num and not catalog_code:
+        return "grupo"
+    # Folha sem numeração hierárquica (ou tipagem explícita)
     if hint in {"item", "servico", "serviço", ""} and has_financial:
-        return "item"
-    if is_group_num and has_financial and hint == "item":
         return "item"
     if is_group_num:
         return "grupo"
@@ -167,20 +168,34 @@ def infer_tipo_linha(
 def is_executive_for_abc(item: dict[str, Any]) -> bool:
     tipo = str(item.get("tipo_linha") or item.get("tipo") or "item").lower()
     desc = str(item.get("descricao") or item.get("description") or "").lower()
-    if tipo != "item":
-        return False
     if "total do grupo" in desc:
         return False
     if item.get("quarentena") is True:
-        return False
-    if item.get("abc_elegivel") is False:
         return False
     vt = parse_brl(
         item.get("valor_total_com_bdi")
         if item.get("valor_total_com_bdi") is not None
         else item.get("valor_total")
     )
-    return vt > 0
+    if vt <= 0:
+        return False
+    qty = float(item.get("quantidade") or item.get("qty") or 0)
+    if qty <= 0:
+        return False
+    if tipo == "composicao":
+        return False
+    if tipo == "grupo":
+        # Folha tipada como grupo só entra se tiver qtd×VU (serviço real)
+        vu = float(
+            item.get("valor_unitario_com_bdi")
+            or item.get("valor_unitario")
+            or 0
+        )
+        return vu > 0
+    # Flag explícita do cliente/pipeline — não bloqueia folhas grupo (acima)
+    if item.get("abc_elegivel") is False:
+        return False
+    return tipo == "item" or tipo == ""
 
 
 def _item_numero_of(item: dict[str, Any]) -> str:
@@ -189,10 +204,10 @@ def _item_numero_of(item: dict[str, Any]) -> str:
 
 def drop_non_leaf_executives(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Remove pais hierárquicos quando há filhos na mesma lista (evita 1.2 + 1.2.1).
+    Remove pais hierárquicos quando há filhos na mesma lista (evita 10 + 10.1).
 
-    Mantém serviço precificado (qtd×VU) mesmo com filho fantasma por numeração
-    inconsistente no PDF (ex.: 3.1.1 e 3.1.1.1 em seções diferentes).
+    Regra estrita: agregador com filhos NUNCA entra na Curva ABC — o valor do
+    pai é subtotal de validação, não serviço-folha do Pareto.
     """
     numbers = {_item_numero_of(i) for i in items if _item_numero_of(i)}
     out: list[dict[str, Any]] = []
@@ -200,17 +215,7 @@ def drop_non_leaf_executives(items: list[dict[str, Any]]) -> list[dict[str, Any]
         num = _item_numero_of(item)
         has_child = bool(num) and any(other.startswith(num + ".") for other in numbers)
         if has_child:
-            qty = float(item.get("quantidade") or 0)
-            vu = float(
-                item.get("valor_unitario_com_bdi")
-                or item.get("valor_unitario")
-                or 0
-            )
-            codigo = str(item.get("codigo") or "").strip()
-            total = line_total_com_bdi(item)
-            priced = qty > 0 and vu > 0 and (codigo or abs(vu - total) > 0.02)
-            if not priced:
-                continue
+            continue
         out.append(item)
     return out
 
@@ -262,11 +267,17 @@ def enrich_item_pricing_and_type(raw: dict[str, Any]) -> dict[str, Any]:
     confianca = min(confianca, pricing["confianca_preco"])
 
     quarantine = bool(pricing["quarentena"])
+    qty = float(pricing["quantidade"] or 0)
+    vu = float(
+        pricing["valor_unitario_com_bdi"] or pricing["valor_unitario_sem_bdi"] or 0
+    )
+    # Folha tipada como grupo (ex.: 7.5 / 16.1 sem SINAPI) com qtd×VU — elegível à ABC
+    priced_grupo_leaf = tipo == "grupo" and qty > 0 and vu > 0
     abc_eligible = (
-        tipo == "item"
-        and not quarantine
+        not quarantine
         and pricing["valor_total_com_bdi"] > 0
         and "total do grupo" not in descricao.lower()
+        and (tipo == "item" or priced_grupo_leaf)
     )
 
     item.update(

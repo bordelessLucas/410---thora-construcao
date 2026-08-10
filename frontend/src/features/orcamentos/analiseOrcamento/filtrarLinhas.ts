@@ -5,6 +5,7 @@ import {
   SUBTOTAL_KEYWORDS,
 } from "./constants";
 import type { LinhaOrcamentoEntrada } from "./types";
+import { isHierarchyLeaf } from "../recalcularCurvaABC";
 
 function normalizeText(value: string): string {
   return value
@@ -68,9 +69,24 @@ export function isCapitulo(linha: LinhaOrcamentoEntrada): boolean {
   );
 }
 
+/** Folha tipada como grupo (ex.: 7.5 / 16.1 sem SINAPI) com qtd×VU — analisável/ABC. */
+export function isServicoFolhaPrecificado(linha: LinhaOrcamentoEntrada): boolean {
+  return (
+    linha.quantidade > 0 &&
+    linha.precoUnitario > 0 &&
+    linha.precoTotalComBdi > 0 &&
+    linha.descricao.trim().length > 0
+  );
+}
+
 export function isGrupoSecao(linha: LinhaOrcamentoEntrada): boolean {
   const tipo = normalizeText(linha.tipoLinha ?? "");
-  if (EXCLUSAO_TIPO_LINHA.has(tipo)) return true;
+
+  // Não excluir folhas precificadas só porque a tipagem veio como "grupo"
+  if (EXCLUSAO_TIPO_LINHA.has(tipo)) {
+    if (isServicoFolhaPrecificado(linha)) return false;
+    return true;
+  }
 
   const semDadosFinanceiros =
     linha.quantidade <= 0 &&
@@ -91,16 +107,27 @@ export function isGrupoSecao(linha: LinhaOrcamentoEntrada): boolean {
   );
 }
 
-export function motivoExclusaoLinha(linha: LinhaOrcamentoEntrada): string | null {
+export function motivoExclusaoLinha(
+  linha: LinhaOrcamentoEntrada,
+  allItemNumeros?: Iterable<string>,
+): string | null {
   if (isCabecalhoColunas(linha)) return "Cabeçalho de colunas";
   if (isSubtotal(linha)) return "Linha de subtotal/totalização";
   if (isCapitulo(linha)) return "Capítulo/categoria";
+  // Mesma regra dos cards ABC: pai com filhos = agregador, fora da análise de serviço
+  const num = linha.itemNumero.trim();
+  if (num && allItemNumeros && !isHierarchyLeaf(num, allItemNumeros)) {
+    return "Grupo/agregador hierárquico";
+  }
   if (isGrupoSecao(linha)) return "Grupo/seção";
   return null;
 }
 
-export function isLinhaAnalisavel(linha: LinhaOrcamentoEntrada): boolean {
-  if (motivoExclusaoLinha(linha)) return false;
+export function isLinhaAnalisavel(
+  linha: LinhaOrcamentoEntrada,
+  allItemNumeros?: Iterable<string>,
+): boolean {
+  if (motivoExclusaoLinha(linha, allItemNumeros)) return false;
 
   return (
     linha.descricao.trim().length > 0 &&

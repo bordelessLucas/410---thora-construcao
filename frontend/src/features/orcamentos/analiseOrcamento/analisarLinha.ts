@@ -58,11 +58,12 @@ function statusGeralFromVerificacoes(verificacoes: VerificacaoLinha[]): Resultad
 export function analisarLinhaOrcamento(
   linha: LinhaOrcamentoEntrada,
   contexto?: ContextoAnaliseOrcamento,
+  allItemNumeros?: Iterable<string>,
 ): ResultadoLinhaAnalise {
   const resolved = resolveContexto(contexto);
-  const motivoIgnorado = motivoExclusaoLinha(linha);
+  const motivoIgnorado = motivoExclusaoLinha(linha, allItemNumeros);
 
-  if (motivoIgnorado || !isLinhaAnalisavel(linha)) {
+  if (motivoIgnorado || !isLinhaAnalisavel(linha, allItemNumeros)) {
     return {
       linhaId: linha.id,
       itemNumero: linha.itemNumero,

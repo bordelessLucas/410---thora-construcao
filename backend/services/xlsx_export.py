@@ -102,6 +102,7 @@ def _is_composicao_row(raw: Dict[str, Any]) -> bool:
 
 
 def _is_executive_row(raw: Dict[str, Any]) -> bool:
+    """Linha de serviço executivo na planilha analítica (não usa hierarquia ABC)."""
     return _resolve_tipo_linha(raw) == "item" and not _is_group_row(raw)
 
 
@@ -175,11 +176,16 @@ def _line_total_com_bdi(raw: Dict[str, Any]) -> float:
     bdi = _coerce_bdi(raw.get("bdi") or raw.get("BDI"))
     qty = _coerce_number(raw.get("qty") or raw.get("quantidade") or raw.get("quantity"))
     unit_com_bdi = _coerce_number(
-        raw.get("unitPrice") or raw.get("valor_unitario") or raw.get("unitValue")
+        raw.get("unitPrice")
+        or raw.get("valor_unitario_com_bdi")
+        or raw.get("valor_unitario")
+        or raw.get("unitValue")
     )
     total_com_bdi = _coerce_number(
         raw.get("lineTotal")
         or raw.get("line_total")
+        or raw.get("valor_total_com_bdi")
+        or raw.get("total_com_bdi")
         or raw.get("totalValue")
         or raw.get("valor_total")
     )
@@ -192,18 +198,65 @@ def _line_total_com_bdi(raw: Dict[str, Any]) -> float:
 
 
 def _normalize_base_row(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normaliza linha para Excel preservando campos originais.
+
+    Não reconstrói quantidade a partir do total. Prefere:
+      quantidade original, VU s/BDI, VU c/BDI, total c/BDI, BDI%.
+    """
     bdi = _coerce_bdi(raw.get("bdi") or raw.get("BDI"))
-    qty = _coerce_number(raw.get("qty") or raw.get("quantidade") or raw.get("quantity"))
-    unit_com_bdi = _coerce_number(
-        raw.get("unitPrice") or raw.get("valor_unitario") or raw.get("unitValue")
+
+    qty_raw = raw.get("quantidade")
+    if qty_raw in (None, ""):
+        qty_raw = raw.get("qty") if raw.get("qty") not in (None, "") else raw.get("quantity")
+    qty = _coerce_number(qty_raw)
+
+    unit_sem = _coerce_number(
+        raw.get("valor_unitario_sem_bdi")
+        or raw.get("unitPriceSemBdi")
     )
+    unit_com = _coerce_number(
+        raw.get("valor_unitario_com_bdi")
+        or raw.get("unit_com_bdi")
+        or raw.get("unitPriceComBdi")
+    )
+    unit_raw = _coerce_number(
+        raw.get("valor_unitario") or raw.get("unitPrice") or raw.get("unitValue")
+    )
+
     total_com_bdi = _line_total_com_bdi(raw)
     factor = _bdi_factor(bdi)
-    unit_sem_bdi = unit_com_bdi / factor if factor > 0 else unit_com_bdi
-    if unit_com_bdi <= 0 and qty > 0 and total_com_bdi > 0:
-        unit_com_bdi = total_com_bdi / qty
-    if unit_sem_bdi <= 0 and qty > 0 and total_com_bdi > 0:
-        unit_sem_bdi = (total_com_bdi / factor) / qty if factor > 0 else total_com_bdi / qty
+
+    # Preferir VU explícitos; unit_raw só como fallback (sem_bdi por contrato)
+    if unit_sem <= 0 and unit_raw > 0 and unit_com <= 0:
+        unit_sem = unit_raw
+    if unit_com <= 0 and unit_raw > 0 and unit_sem <= 0:
+        # Ambíguo: se bate com total como c/BDI, assume c/BDI
+        if qty > 0 and total_com_bdi > 0:
+            err_com = abs(qty * unit_raw - total_com_bdi) / max(total_com_bdi, 1)
+            if err_com <= 0.02:
+                unit_com = unit_raw
+            else:
+                unit_sem = unit_raw
+        else:
+            unit_sem = unit_raw
+
+    if bdi <= 0 and qty > 0 and unit_sem > 0 and total_com_bdi > 0:
+        from app.domain.money import infer_bdi_percent
+
+        bdi = infer_bdi_percent(qty, unit_sem, total_com_bdi)
+        factor = _bdi_factor(bdi)
+
+    if unit_sem <= 0 and unit_com > 0 and factor > 0:
+        unit_sem = unit_com / factor
+    if unit_com <= 0 and unit_sem > 0:
+        unit_com = unit_sem * factor if factor > 0 else unit_sem
+
+    # Só deriva VU do total se VU estiver ausente — NUNCA altera quantidade
+    if unit_com <= 0 and qty > 0 and total_com_bdi > 0:
+        unit_com = total_com_bdi / qty
+    if unit_sem <= 0 and unit_com > 0 and factor > 0:
+        unit_sem = unit_com / factor
 
     return {
         "code": str(raw.get("code") or raw.get("codigo") or "").strip(),
@@ -211,7 +264,8 @@ def _normalize_base_row(raw: Dict[str, Any]) -> Dict[str, Any]:
         "bdi": bdi,
         "unit": str(raw.get("unit") or raw.get("unidade") or "").strip(),
         "qty": qty,
-        "unit_com_bdi": unit_com_bdi,
+        "unit_sem_bdi": unit_sem,
+        "unit_com_bdi": unit_com,
         "total_com_bdi": total_com_bdi,
         "grupo": str(raw.get("grupo") or "").strip(),
         "classification": str(raw.get("classification") or raw.get("class") or "")
@@ -252,37 +306,44 @@ def _extract_catalog_code(raw: Dict[str, Any]) -> str:
 
 
 def prepare_curva_abc_rows(items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], float]:
-    """Ordenação por valor decrescente + percentuais e classificação A/B/C."""
+    """
+    Mesma fonte de verdade dos cards ABC: classify_abc_items
+    (folhas tipadas como item OU grupo precificado, sem pais hierárquicos).
+
+    % Individual e % Acumulado usam o mesmo total_geral das folhas.
+    """
+    from app.domain.abc_curve import classify_abc_items, line_total_com_bdi
+
+    classified = classify_abc_items(items)
+    executives = [
+        i
+        for i in classified
+        if str(i.get("classification") or "").upper() in ("A", "B", "C")
+    ]
+
     prepared: List[Dict[str, Any]] = []
-    for raw in items:
-        if not isinstance(raw, dict) or not _is_executive_row(raw):
-            continue
+    for raw in executives:
         row = _normalize_base_row(raw)
         row["item_numero"] = str(raw.get("item") or raw.get("item_numero") or "").strip()
         row["banco"] = str(raw.get("banco") or "").strip()
         row["catalog_code"] = _extract_catalog_code(raw)
+        row["classification"] = str(raw.get("classification") or "").upper()
+        # Universo único: percentuais já calculados em classify_abc_items
+        row["percent"] = float(raw.get("individual_percentage") or 0.0)
+        row["accumulated"] = float(raw.get("accumulated_percentage") or 0.0)
+        row["accumulated_percentage"] = row["accumulated"]
         prepared.append(row)
 
-    prepared.sort(key=lambda row: row["total_com_bdi"], reverse=True)
-    total_geral = sum(row["total_com_bdi"] for row in prepared)
-
-    accumulated = 0.0
-    for row in prepared:
-        percent = (row["total_com_bdi"] / total_geral * 100.0) if total_geral > 0 else 0.0
-        pct_before = accumulated
-        accumulated += percent
-        row["percent"] = percent
-        acc_front = row.get("accumulated_percentage")
-        row["accumulated"] = (
-            float(acc_front) if acc_front is not None and acc_front != "" else accumulated
-        )
-        if not row["classification"]:
-            if pct_before < 80:
-                row["classification"] = "A"
-            elif pct_before < 95:
-                row["classification"] = "B"
-            else:
-                row["classification"] = "C"
+    total_geral = sum(line_total_com_bdi(i) for i in executives)
+    # Recalcula ambos os % no mesmo total (defensivo — evita misturar bases)
+    if total_geral > 0 and prepared:
+        accumulated = 0.0
+        for row in prepared:
+            percent = row["total_com_bdi"] / total_geral * 100.0
+            accumulated += percent
+            row["percent"] = percent
+            row["accumulated"] = accumulated
+            row["accumulated_percentage"] = accumulated
 
     return prepared, total_geral
 
@@ -953,11 +1014,13 @@ def _executive_rows_from_items(items: List[Dict[str, Any]]) -> List[Dict[str, An
     rows, _ = prepare_curva_abc_rows(items)
     if rows:
         return rows
-    prepared: List[Dict[str, Any]] = []
-    for raw in items:
-        if isinstance(raw, dict) and _is_executive_row(raw):
-            prepared.append(_normalize_base_row(raw))
-    return prepared
+    from app.domain.abc_curve import drop_non_leaf_executives, is_executive_for_abc
+
+    executives = [
+        raw for raw in items if isinstance(raw, dict) and is_executive_for_abc(raw)
+    ]
+    executives = drop_non_leaf_executives(executives)
+    return [_normalize_base_row(raw) for raw in executives]
 
 
 def gerar_aba_sinapi(ws, items: List[Dict[str, Any]]) -> None:

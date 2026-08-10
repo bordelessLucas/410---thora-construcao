@@ -57,6 +57,7 @@ class RawBudgetRow:
     quantidade: float = 0.0
     valor_unitario: float = 0.0
     valor_total: float = 0.0
+    bdi: float = 0.0
     peso: float = 0.0
     page: int = 0
     kind: LineKind = "unknown"

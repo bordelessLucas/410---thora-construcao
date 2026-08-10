@@ -146,6 +146,32 @@ def resolve_pricing_contract(
     if vt_com <= 0 and vt_raw > 0:
         vt_com = vt_raw
 
+    # Linha zerada do edital: qty=0 e total=0 com VU de referência → preservar
+    if qty <= 0 and vt_com <= 0 and vt_raw <= 0:
+        vu_hint = vu_raw if vu_raw > 0 else (vu_sem if vu_sem > 0 else vu_com)
+        if vu_hint > 0 or vu_sem > 0 or vu_com > 0:
+            bdi_pct = sanitize_bdi_percent(bdi)
+            factor = 1.0 + bdi_pct / 100.0 if bdi_pct > 0 else 1.0
+            if vu_sem <= 0 and vu_com <= 0 and vu_hint > 0:
+                vu_sem = vu_hint
+            if vu_com <= 0 and vu_sem > 0:
+                vu_com = vu_sem * factor
+            if vu_sem <= 0 and vu_com > 0:
+                vu_sem = vu_com / factor if factor > 0 else vu_com
+            return {
+                "quantidade": 0.0,
+                "bdi": round(bdi_pct, 4),
+                "valor_unitario_sem_bdi": round(vu_sem, 6),
+                "valor_unitario_com_bdi": round(vu_com, 6),
+                "valor_total_sem_bdi": 0.0,
+                "valor_total_com_bdi": 0.0,
+                "valor_unitario": round(vu_sem, 6),
+                "valor_total": 0.0,
+                "quarentena": False,
+                "alertas_preco": ["Linha com quantidade/total zero — fora da Curva ABC"],
+                "confianca_preco": 1.0,
+            }
+
     # Corrige total colado na quantidade (falha clássica de extração ABC)
     vu_hint = vu_raw if vu_raw > 0 else (vu_sem if vu_sem > 0 else vu_com)
     if (

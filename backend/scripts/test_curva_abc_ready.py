@@ -271,6 +271,93 @@ def test_art_crea_faixa_not_treated_as_header():
     assert abs(sum(float(i.get("valor_total") or 0) for i in items) - (100 + 5251 + 3117 + 62.33)) < 0.05
 
 
+def test_drop_non_leaf_excludes_hierarchical_groups():
+    """Grupo 10 + filhos 10.1/10.2 não pode somar o pai na ABC."""
+    from app.domain.abc_curve import classify_abc_items, is_executive_for_abc, line_total_com_bdi
+
+    raw = [
+        {
+            "item_numero": "10",
+            "codigo": "",
+            "descricao": "Execução de pavimentação intertravada",
+            "quantidade": 1.0,
+            "valor_unitario": 5_388_872.56,
+            "valor_total": 5_388_872.56,
+            "valor_total_com_bdi": 5_388_872.56,
+            "tipo_linha": "grupo",
+            "tipo": "grupo",
+        },
+        {
+            "item_numero": "10.1",
+            "codigo": "92398",
+            "descricao": "EXECUÇÃO DE PAVIMENTO EM PISO INTERTRAVADO",
+            "quantidade": 33874.39,
+            "valor_unitario": 143.84,
+            "valor_total": 4_872_492.25,
+            "valor_total_com_bdi": 4_872_492.25,
+            "tipo_linha": "item",
+            "tipo": "item",
+        },
+        {
+            "item_numero": "10.2",
+            "codigo": "",
+            "descricao": "Transporte do bloco de concreto",
+            "quantidade": 1.0,
+            "valor_unitario": 346_948.17,
+            "valor_total": 346_948.17,
+            "valor_total_com_bdi": 346_948.17,
+            "tipo_linha": "grupo",
+            "tipo": "grupo",
+        },
+        {
+            "item_numero": "10.2.1",
+            "codigo": "100992",
+            "descricao": "CARGA, MANOBRA E DESCARGA",
+            "quantidade": 6596.6,
+            "valor_unitario": 6.95,
+            "valor_total": 45_846.37,
+            "valor_total_com_bdi": 45_846.37,
+            "tipo_linha": "item",
+            "tipo": "item",
+        },
+        {
+            "item_numero": "12.3",
+            "codigo": "",
+            "descricao": "Execução de calçada e rampa",
+            "quantidade": 1.0,
+            "valor_unitario": 304_056.41,
+            "valor_total": 304_056.41,
+            "valor_total_com_bdi": 304_056.41,
+            "tipo_linha": "grupo",
+            "tipo": "grupo",
+        },
+        {
+            "item_numero": "12.3.1",
+            "codigo": "94991M",
+            "descricao": "EXECUÇÃO DE PASSEIO",
+            "quantidade": 338.74,
+            "valor_unitario": 897.61,
+            "valor_total": 304_056.41,
+            "valor_total_com_bdi": 304_056.41,
+            "tipo_linha": "item",
+            "tipo": "item",
+        },
+    ]
+    classified = classify_abc_items(raw)
+    with_class = [i for i in classified if i.get("classification") in {"A", "B", "C"}]
+    nums = {str(i.get("item_numero")) for i in with_class}
+    assert "10" not in nums
+    assert "10.2" not in nums
+    assert "12.3" not in nums
+    assert "10.1" in nums
+    assert "10.2.1" in nums
+    assert "12.3.1" in nums
+    soma = sum(line_total_com_bdi(i) for i in with_class)
+    # Sem dupla contagem dos pais
+    assert abs(soma - (4_872_492.25 + 45_846.37 + 304_056.41)) < 0.05
+    assert all(is_executive_for_abc(i) or i.get("classification") for i in with_class)
+
+
 def test_does_not_merge_trailing_abc_services():
     """Últimos serviços (mesmo Title Case) não podem fundir na descrição."""
     parser = BudgetParser()
@@ -390,6 +477,252 @@ def test_abc_items_without_catalog_code_stay_executive():
     assert all(i.get("classification") in {"A", "B", "C"} for i in classified)
 
 
+def test_priced_grupo_leaves_in_abc_and_xlsx_export():
+    """
+    Folhas tipadas como grupo (7.5 / 7.6 / 16.1 sem SINAPI) devem entrar na ABC
+    e no prepare_curva_abc_rows — mesmo filtro dos cards (86 folhas).
+    """
+    from app.domain.abc_curve import classify_abc_items, enrich_item_pricing_and_type
+    from services.xlsx_export import prepare_curva_abc_rows
+
+    raw = [
+        {
+            "item_numero": "1.1.1",
+            "item": "1.1.1",
+            "codigo": "90001",
+            "descricao": "Servico A dominante",
+            "quantidade": 1.0,
+            "unidade": "UN",
+            "valor_unitario": 8_000_000.0,
+            "valor_total": 8_000_000.0,
+            "valor_total_com_bdi": 8_000_000.0,
+            "tipo_linha": "item",
+            "tipo": "item",
+        },
+        {
+            "item_numero": "16.1",
+            "item": "16.1",
+            "codigo": "",
+            "descricao": "Poco de Visita PVI 02",
+            "quantidade": 1.0,
+            "unidade": "UN",
+            "valor_unitario": 111_780.30,
+            "valor_total": 111_780.30,
+            "valor_total_com_bdi": 111_780.30,
+            "tipo_linha": "grupo",
+            "tipo": "grupo",
+        },
+        {
+            "item_numero": "7.5",
+            "item": "7.5",
+            "codigo": "",
+            "descricao": "Disposicao final de residuos segregados",
+            "quantidade": 1.0,
+            "unidade": "M3",
+            "valor_unitario": 7_991.90,
+            "valor_total": 7_991.90,
+            "valor_total_com_bdi": 7_991.90,
+            "tipo_linha": "grupo",
+            "tipo": "grupo",
+        },
+        {
+            "item_numero": "7.6",
+            "item": "7.6",
+            "codigo": "",
+            "descricao": "Disposicao final de residuos nao segregados",
+            "quantidade": 1.0,
+            "unidade": "M3",
+            "valor_unitario": 5_682.59,
+            "valor_total": 5_682.59,
+            "valor_total_com_bdi": 5_682.59,
+            "tipo_linha": "grupo",
+            "tipo": "grupo",
+        },
+        # Pai agregador — fora da ABC
+        {
+            "item_numero": "7",
+            "item": "7",
+            "codigo": "",
+            "descricao": "RESIDUOS",
+            "quantidade": 1.0,
+            "unidade": "",
+            "valor_unitario": 13_674.49,
+            "valor_total": 13_674.49,
+            "valor_total_com_bdi": 13_674.49,
+            "tipo_linha": "grupo",
+            "tipo": "grupo",
+        },
+    ]
+
+    for leaf in ("16.1", "7.5", "7.6"):
+        enriched = enrich_item_pricing_and_type(
+            next(i for i in raw if i["item_numero"] == leaf)
+        )
+        assert enriched["abc_elegivel"] is True, leaf
+
+    classified = [i for i in classify_abc_items(raw) if i.get("classification")]
+    nums = {str(i.get("item_numero")) for i in classified}
+    assert nums == {"1.1.1", "16.1", "7.5", "7.6"}
+    total_cls = sum(float(i.get("valor_total_com_bdi") or 0) for i in classified)
+    assert abs(total_cls - 8_125_454.79) < 0.05
+
+    rows, total = prepare_curva_abc_rows(raw)
+    assert len(rows) == 4
+    assert abs(total - 8_125_454.79) < 0.05
+    export_nums = {str(r.get("item_numero")) for r in rows}
+    assert export_nums == {"1.1.1", "16.1", "7.5", "7.6"}
+
+    # % individual e acumulado no mesmo universo
+    top = rows[0]
+    assert abs(top["percent"] - top["accumulated"]) < 0.0001
+    assert abs(top["percent"] - (8_000_000.0 / total * 100)) < 0.01
+
+
+def test_resolve_qty_vu_four_column_layout():
+    """qtd + VU s/BDI + VU c/BDI + total — não promover VU para quantidade."""
+    from app.domain.budget_pipeline.engine2_table import _resolve_qty_vu_from_moneys
+
+    q, vu, vt = _resolve_qty_vu_from_moneys(
+        [33_874.39, 115.27, 143.84, 4_872_492.25]
+    )
+    assert abs(q - 33_874.39) < 0.01, q
+    assert abs(vu - 115.27) < 0.01, vu
+    assert abs(vt - 4_872_492.25) < 0.05, vt
+
+    q2, vu2, vt2 = _resolve_qty_vu_from_moneys([30.0, 2_985.83, 3_726.01, 111_780.30])
+    assert abs(q2 - 30.0) < 0.01, q2
+    assert abs(vu2 - 2_985.83) < 0.01, vu2
+    assert abs(vt2 - 111_780.30) < 0.05, vt2
+
+    q3, vu3, vt3 = _resolve_qty_vu_from_moneys([12_119.0, 51.43, 64.17, 777_676.23])
+    assert abs(q3 - 12_119.0) < 0.01, q3
+    assert abs(vu3 - 51.43) < 0.01, vu3
+
+
+def test_zero_qty_zero_total_not_invented():
+    """qty=0 + total=0 + VU>0 → preservar zeros (não inventar 1×VU)."""
+    from app.domain.abc_curve import classify_abc_items, is_executive_for_abc
+    from app.domain.budget_pipeline.engine2_table import _hit_to_row, _resolve_qty_vu_from_moneys
+    from app.domain.money import resolve_pricing_contract
+
+    q, vu, vt = _resolve_qty_vu_from_moneys([0.0, 0.55, 0.68, 0.0])
+    assert q == 0.0
+    assert abs(vu - 0.55) < 0.01 or abs(vu - 0.68) < 0.01
+    assert vt == 0.0
+
+    pricing = resolve_pricing_contract(
+        quantidade=0,
+        valor_unitario=0.55,
+        valor_unitario_com_bdi=0.68,
+        valor_total=0,
+        valor_total_com_bdi=0,
+        bdi=24.79,
+    )
+    assert pricing["quantidade"] == 0.0
+    assert pricing["valor_total_com_bdi"] == 0.0
+
+    row = _hit_to_row(
+        {
+            "item_numero": "10.2.3",
+            "codigo": "95430",
+            "descricao": "Servico zerado",
+            "unidade": "m2",
+            "quantidade": 0.0,
+            "valor_unitario": 0.55,
+            "valor_total": 0.0,
+            "bdi": 24.79,
+        },
+        ["10.2.3", "95430", "Servico zerado", "m2", "0", "0,55", "0,68", "0,00"],
+        page=1,
+    )
+    assert row.quantidade == 0.0
+    assert row.valor_total == 0.0
+
+    classified = classify_abc_items(
+        [
+            {
+                "item_numero": "10.2.3",
+                "codigo": "95430",
+                "descricao": "Servico zerado",
+                "quantidade": 0,
+                "valor_unitario": 0.55,
+                "valor_unitario_com_bdi": 0.68,
+                "valor_total": 0,
+                "valor_total_com_bdi": 0,
+                "tipo_linha": "item",
+            },
+            {
+                "item_numero": "10.1",
+                "codigo": "92398",
+                "descricao": "Pavimento",
+                "quantidade": 100,
+                "valor_unitario": 10,
+                "valor_total": 1000,
+                "valor_total_com_bdi": 1000,
+                "tipo_linha": "item",
+            },
+        ]
+    )
+    execs = [i for i in classified if i.get("classification")]
+    assert len(execs) == 1
+    assert execs[0]["item_numero"] == "10.1"
+    assert not is_executive_for_abc(classified[0]) or classified[0].get("item_numero") == "10.1"
+
+
+def test_parse_14_1_integer_qty_after_unit():
+    """12119 após unidade M não pode ser descartado como código SINAPI."""
+    from app.domain.budget_pipeline.engine2_table import _parse_semantic_row
+
+    cells = [
+        "14.1",
+        "SINAPI",
+        "94273",
+        "SERVICO EXEMPLO",
+        "M",
+        "12119",
+        "51,43",
+        "64,17",
+        "777.676,23",
+    ]
+    row = _parse_semantic_row(cells, 1)
+    assert row is not None
+    assert abs(row.quantidade - 12_119.0) < 0.01, row.quantidade
+    assert abs(row.valor_unitario - 51.43) < 0.01, row.valor_unitario
+    assert abs(row.valor_total - 777_676.23) < 0.05, row.valor_total
+
+
+def test_xlsx_abc_preserves_qty_and_unit_com_bdi():
+    from services.xlsx_export import prepare_curva_abc_rows
+
+    raw = [
+        {
+            "item_numero": "10.1",
+            "item": "10.1",
+            "codigo": "92398",
+            "descricao": "EXECUÇÃO DE PAVIMENTO EM PISO INTERTRAVADO",
+            "unidade": "m2",
+            "quantidade": 33_874.39,
+            "qty": 33_874.39,
+            "valor_unitario": 115.27,
+            "valor_unitario_sem_bdi": 115.27,
+            "valor_unitario_com_bdi": 143.84,
+            "valor_total": 4_872_492.25,
+            "valor_total_com_bdi": 4_872_492.25,
+            "bdi": 24.79,
+            "tipo_linha": "item",
+            "tipo": "item",
+        }
+    ]
+    rows, total = prepare_curva_abc_rows(raw)
+    assert len(rows) == 1
+    row = rows[0]
+    assert abs(row["qty"] - 33_874.39) < 0.01, row["qty"]
+    assert abs(row["unit_com_bdi"] - 143.84) < 0.02, row["unit_com_bdi"]
+    assert abs(row["bdi"] - 24.79) < 0.05, row["bdi"]
+    assert abs(row["total_com_bdi"] - 4_872_492.25) < 0.05
+    assert abs(total - 4_872_492.25) < 0.05
+
+
 def test_parse_curva_abc_adapter_sequential_item_numero():
     rows = build_fabrica_social_abc_rows()
     items = parse_curva_abc(rows, page=1)
@@ -451,9 +784,15 @@ def main() -> None:
         test_profile_match_curva_abc,
         test_extract_approx_29_items_and_totals,
         test_art_crea_faixa_not_treated_as_header,
+        test_drop_non_leaf_excludes_hierarchical_groups,
         test_does_not_merge_trailing_abc_services,
         test_realign_numeric_description_descarte,
         test_abc_items_without_catalog_code_stay_executive,
+        test_priced_grupo_leaves_in_abc_and_xlsx_export,
+        test_resolve_qty_vu_four_column_layout,
+        test_zero_qty_zero_total_not_invented,
+        test_parse_14_1_integer_qty_after_unit,
+        test_xlsx_abc_preserves_qty_and_unit_com_bdi,
         test_parse_curva_abc_adapter_sequential_item_numero,
         test_parse_curva_abc_adapter_preserves_doc_fields,
         test_fragmented_code_merge,

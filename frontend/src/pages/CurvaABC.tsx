@@ -436,16 +436,18 @@ const CurvaABC: React.FC = () => {
               <CheckCircle2 size={20} className="text-blue-600 flex-shrink-0 mt-0.5" />
               <div>
                 <h3 className="font-semibold text-blue-900">
-                  Curva ABC do documento completo
+                  Curva ABC dos serviços-folha
                 </h3>
                 <p className="text-sm text-blue-700 mt-1">
                   Analisando {items.length}{" "}
-                  {items.length === 1 ? "item" : "itens"} do orçamento
-                  {typeof (location.state as { orcamentoTotalItens?: number })
-                    ?.orcamentoTotalItens === "number" &&
-                  (location.state as { orcamentoTotalItens?: number })
-                    .orcamentoTotalItens !== items.length
-                    ? ` (${(location.state as { orcamentoTotalItens?: number }).orcamentoTotalItens} no documento)`
+                  {items.length === 1 ? "serviço" : "serviços"} (sem grupos/subtotais)
+                  {typeof (location.state as { totalOficialOrcamento?: number })
+                    ?.totalOficialOrcamento === "number"
+                    ? ` · total oficial R$ ${(
+                        location.state as { totalOficialOrcamento: number }
+                      ).totalOficialOrcamento.toLocaleString("pt-BR", {
+                        minimumFractionDigits: 2,
+                      })}`
                     : ""}
                   .
                 </p>

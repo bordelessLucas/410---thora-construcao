@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from app.domain.budget_pipeline.models import LineKind, RawBudgetRow, TextElement, TextLine
-from app.domain.money import parse_brl
+from app.domain.money import parse_brl, relative_error
 
 logger = logging.getLogger(__name__)
 
@@ -213,12 +213,19 @@ def _looks_numeric_token(text: str) -> bool:
     t = text.strip().replace("R$", "").strip()
     if not t or "%" in t:
         return False
-    # Código de catálogo (SINAPI/SICRO etc.): só dígitos, sem decimais — não é qtd/VU/total
+    # Inteiro longo sem decimal: em geral código SINAPI (92398), não qtd/VU.
+    # Quantidades inteiras (ex.: 12119) são aceitas depois da unidade — ver parser.
     if re.fullmatch(r"\d{5,}", t):
         return False
     if _MONEY_RE.match(t) or _NUM_RE.match(t):
         return True
     return False
+
+
+def _looks_qty_integer_token(text: str) -> bool:
+    """Quantidade inteira após a unidade (12119 M) — distinta de código de catálogo."""
+    t = text.strip().replace("R$", "").strip()
+    return bool(re.fullmatch(r"\d{4,7}", t))
 
 
 def _page_width_hint(elements: list[TextElement]) -> float:
@@ -411,6 +418,12 @@ def normalize_row_cells(cells: list[str]) -> list[str]:
         if len(parts) == 2 and _UNIT_RE.match(parts[0]) and _NUM_RE.match(parts[1]):
             expanded.extend(parts)
             continue
+        # '12.119 M' / '12119 M' → quantidade + unidade
+        if len(parts) == 2 and (
+            _NUM_RE.match(parts[0]) or _MONEY_RE.match(parts[0]) or _looks_qty_integer_token(parts[0])
+        ) and _UNIT_RE.match(parts[1]):
+            expanded.extend(parts)
+            continue
         if len(parts) >= 2 and all(_NUM_RE.match(p) or _MONEY_RE.match(p) for p in parts):
             expanded.extend(parts)
             continue
@@ -496,20 +509,149 @@ def _hit_to_row(hit: dict[str, Any], cells: list[str], page: int) -> RawBudgetRo
         and abs(qty * vu - vt) <= max(0.05, vt * 0.02)
     ):
         kind = "item"
+    # qty explícita 0 + total 0 → preservar (não inventar 1×VU).
+    # qty ausente (0) com total > 0 → default 1 só para item precificado.
+    if qty > 0:
+        quantidade = qty
+    elif vt <= 0:
+        quantidade = 0.0
+    elif kind == "item" and vu > 0 and abs(vu - vt) > 0.02:
+        quantidade = 1.0
+    else:
+        quantidade = 0.0
+
     row = RawBudgetRow(
         item_numero=item_numero,
         codigo=codigo,
         banco=str(hit.get("banco") or ""),
         descricao=str(hit.get("descricao") or ""),
         unidade=str(hit.get("unidade") or "un"),
-        quantidade=qty if qty > 0 else (1.0 if kind == "item" else 0.0),
+        quantidade=quantidade,
         valor_unitario=vu,
         valor_total=vt,
+        bdi=float(hit.get("bdi") or 0),
         page=page,
         kind=kind,
         cells=cells,
     )
     return _mark_completeness(row)
+
+
+def _resolve_qty_vu_from_moneys(
+    moneys: list[float],
+    *,
+    total_com: float | None = None,
+) -> tuple[float, float, float]:
+    """
+    Desambigua cauda monetária → (quantidade, valor_unitario_sem_bdi, total_com_bdi).
+
+    Layouts comuns:
+      [qtd, vu_sem, total_com]
+      [qtd, vu_sem, vu_com, total_com]
+      [qtd, vu_sem, total_sem, total_com]
+      [0, vu_sem, vu_com, 0]  → linha zerada (preservar qty=0, total=0)
+
+    Nunca promove VU→quantidade. Nunca inventa total a partir de VU quando qty=0.
+    """
+    raw = [float(v) for v in moneys]
+    if not raw:
+        return 0.0, 0.0, float(total_com or 0.0)
+
+    # Total explícito (último valor ou total_com passado)
+    if total_com is not None and total_com >= 0:
+        total = float(total_com)
+    else:
+        total = raw[-1]
+
+    # Linha zerada do PDF: quantidade 0 e total 0 (VU pode existir para referência)
+    if len(raw) >= 2 and raw[0] == 0.0 and total == 0.0:
+        vu = next((v for v in raw[1:-1] if v > 0), (raw[1] if len(raw) > 1 and raw[1] > 0 else 0.0))
+        return 0.0, vu, 0.0
+
+    # Remove zeros internos só para desambiguação de colunas positivas,
+    # mas se a 1ª coluna era 0 e o total > 0, qty permanece 0 (não reconstruir).
+    leading_zero_qty = len(raw) >= 2 and raw[0] == 0.0
+    vals = [float(v) for v in raw if float(v) > 0]
+    if not vals:
+        return 0.0, 0.0, float(total if total > 0 else 0.0)
+
+    if total <= 0:
+        total = vals[-1]
+    candidates = vals[:-1] if abs(vals[-1] - total) <= max(0.01, abs(total) * 1e-9) else vals
+
+    # Qty explícita zero + total positivo residual: não inventar qty = total/vu
+    if leading_zero_qty:
+        vu = candidates[0] if candidates else 0.0
+        return 0.0, vu, total if total > 0 else 0.0
+
+    def _ok(q: float, vu: float, tgt: float, tol: float = 0.03) -> bool:
+        if q <= 0 or vu <= 0 or tgt <= 0:
+            return False
+        return relative_error(q * vu, tgt) <= tol
+
+    # 1) qtd × vu_com ≈ total  (preferir quando há 2+ candidatos antes do total)
+    if len(candidates) >= 2:
+        q = candidates[0]
+        # [qtd, vu_sem, vu_com] — testa qtd×último ≈ total
+        vu_com = candidates[-1]
+        if _ok(q, vu_com, total):
+            if len(candidates) >= 3 and _ok(q, candidates[1], candidates[2]):
+                return q, candidates[1], total
+            if len(candidates) >= 2 and candidates[1] > 0 and candidates[1] <= vu_com:
+                return q, candidates[1], total
+            return q, vu_com, total
+
+        # [qtd, vu_sem, total_sem] antes do total_com
+        if len(candidates) >= 3 and _ok(q, candidates[1], candidates[2]):
+            return q, candidates[1], total
+
+        # [qtd, vu_sem] — qtd×vu_sem ≈ total (sem BDI ou BDI embutido no total)
+        if _ok(q, candidates[1], total):
+            return q, candidates[1], total
+
+        # qtd×vu_sem × fator BDI típico (até ~40%) ≈ total
+        if q > 0 and candidates[1] > 0:
+            base = q * candidates[1]
+            if base > 0 and total > base * 0.98 and total / base <= 1.45:
+                return q, candidates[1], total
+
+        # Fallback: 1º candidato é VU e qty = total/vu_com (só se 1º NÃO parece quantidade
+        # e o 2º×algum fator fecha). Evita qty=51,43 quando faltou 12119 na lista.
+        if len(candidates) >= 2:
+            a, b = candidates[0], candidates[1]
+            # a parece preço unitário (pequeno) e total/b ou total/a parece quantidade
+            for vu_try in (b, a):
+                if vu_try <= 0 or vu_try > 10_000:
+                    continue
+                q_try = total / vu_try
+                if q_try >= 10 and _ok(q_try, vu_try, total, tol=0.02):
+                    # Preferir interpretação em que o outro valor é vu_sem (~ ≤ vu_com)
+                    other = a if vu_try == b else b
+                    if other > 0 and other <= vu_try * 1.001:
+                        return q_try, other, total
+                    return q_try, vu_try, total
+
+    if len(candidates) == 1:
+        mid = candidates[0]
+        if mid > 0 and abs(mid - total) > 0.01:
+            ratio = total / mid if mid else 0.0
+            if mid < 10_000 and 0.5 < ratio < 1_000_000 and relative_error(mid * ratio, total) <= 0.02:
+                if abs(ratio - round(ratio)) < 0.02 or ratio > mid:
+                    if mid < ratio or mid < 5_000:
+                        return ratio, mid, total
+                return mid, ratio, total
+        # Um único valor positivo + total igual → não inventar qty=1
+        if abs(mid - total) <= max(0.01, abs(total) * 1e-9):
+            return 0.0, mid, 0.0 if total == mid and leading_zero_qty else total
+        return 0.0, mid, total if total > 0 else 0.0
+
+    if len(candidates) >= 2:
+        # Fallback seguro: 1º = qtd, 2º = VU (não inverter)
+        q, vu = candidates[0], candidates[1]
+        if q > 0 and vu > 0:
+            return q, vu, total
+
+    return 0.0, 0.0, total if total > 0 else 0.0
 
 
 def _parse_semantic_row(cells: list[str], page: int) -> RawBudgetRow | None:
@@ -526,11 +668,24 @@ def _parse_semantic_row(cells: list[str], page: int) -> RawBudgetRow | None:
 
     item_numero = nonempty[0]
 
+    # Unidade cedo: permite aceitar quantidade inteira (12119) após ela,
+    # sem confundir com código SINAPI (92398) antes da unidade.
+    unit_i_early = None
+    for j, c in enumerate(nonempty):
+        if j == 0:
+            continue
+        tokens = c.split()
+        if _UNIT_RE.match(c) or (tokens and _UNIT_RE.match(tokens[-1])):
+            unit_i_early = j
+            break
+
     # Localiza BDI% e extrai dinheiro da cauda
     bdi_idx = -1
+    bdi_pct = 0.0
     for i, c in enumerate(nonempty):
         if re.fullmatch(r"\d{1,2},\d{2}\s*%", c.strip()):
             bdi_idx = i
+            bdi_pct = parse_brl(c)
 
     money_idxs: list[int] = []
     for i, c in enumerate(nonempty):
@@ -549,77 +704,40 @@ def _parse_semantic_row(cells: list[str], page: int) -> RawBudgetRow | None:
             continue
         if _looks_numeric_token(c):
             money_idxs.append(i)
+            continue
+        # Quantidade inteira após unidade (ex.: 12119 M) — não é código de catálogo
+        if (
+            unit_i_early is not None
+            and i > unit_i_early
+            and _looks_qty_integer_token(c)
+        ):
+            money_idxs.append(i)
 
     if not money_idxs:
         return None
 
-    # Se há BDI%, o total C/BDI é o 1º dinheiro DEPOIS do %; senão, o último dinheiro
+    # Se há BDI%, o total C/BDI é o último dinheiro DEPOIS do %; senão, o último dinheiro
     after_bdi = [i for i in money_idxs if bdi_idx >= 0 and i > bdi_idx]
     before_bdi = [i for i in money_idxs if bdi_idx < 0 or i < bdi_idx]
 
     if after_bdi:
         total_i = after_bdi[-1]
         valor_total = parse_brl(nonempty[total_i])
-        # Antes do BDI: ... qtd, custo_unit, total_s/bdi
-        tail = before_bdi[-3:] if len(before_bdi) >= 3 else before_bdi
-        quantidade = 0.0
-        valor_unitario = 0.0
-        if len(tail) >= 3:
-            quantidade = parse_brl(nonempty[tail[0]])
-            valor_unitario = parse_brl(nonempty[tail[1]])
-            # Se qtd×VU ≈ total S/BDI, VU é custo unitário; total econômico = C/BDI
-        elif len(tail) == 2:
-            a, b = parse_brl(nonempty[tail[0]]), parse_brl(nonempty[tail[1]])
-            # a=qtd ou VU; b=VU ou total S/BDI
-            if a > 0 and b > 0 and a < 1_000_000 and abs(a * b - valor_total) / max(valor_total, 1) < 0.25:
-                quantidade, valor_unitario = a, b
-            elif a > 0 and abs(a - valor_total) > 0.01:
-                quantidade, valor_unitario = 1.0, a
-            else:
-                quantidade, valor_unitario = 1.0, valor_total
-        elif len(tail) == 1:
-            quantidade, valor_unitario = 1.0, parse_brl(nonempty[tail[0]])
-        else:
-            quantidade, valor_unitario = 1.0, valor_total
-        # VU C/BDI aproximado se qtd conhecida
-        if quantidade > 0 and valor_unitario <= 0:
-            valor_unitario = valor_total / quantidade
-        elif quantidade > 0 and valor_total > 0:
-            # Prefere VU derivado do total C/BDI (contrato econômico)
-            derived = valor_total / quantidade
-            if derived > 0:
-                valor_unitario = derived
+        before_vals = [parse_brl(nonempty[i]) for i in before_bdi]
+        quantidade, valor_unitario, valor_total = _resolve_qty_vu_from_moneys(
+            before_vals + [valor_total],
+            total_com=valor_total,
+        )
         num_idxs = before_bdi + after_bdi
     else:
         num_idxs = money_idxs
-        valor_total = parse_brl(nonempty[num_idxs[-1]])
-        valor_unitario = (
-            parse_brl(nonempty[num_idxs[-2]]) if len(num_idxs) >= 2 else valor_total
-        )
-        quantidade = 0.0
-        if len(num_idxs) >= 3:
-            quantidade = parse_brl(nonempty[num_idxs[-3]])
-        elif len(num_idxs) == 2:
-            mid = parse_brl(nonempty[num_idxs[0]])
-            if mid > 0 and valor_total > 0 and abs(mid - valor_total) > 0.01:
-                if mid < 10_000 and valor_total / mid > 0.01:
-                    ratio = valor_total / mid
-                    if abs(ratio - round(ratio)) < 0.02 and 0.5 < ratio < 1_000_000:
-                        quantidade = ratio
-                        valor_unitario = mid
-                    else:
-                        quantidade = 1.0
-                        valor_unitario = mid
-                else:
-                    quantidade = 1.0
-                    valor_unitario = mid
-            else:
-                quantidade = 1.0
-        else:
-            quantidade = 1.0
-            valor_unitario = valor_total
+        money_vals = [parse_brl(nonempty[i]) for i in num_idxs]
+        quantidade, valor_unitario, valor_total = _resolve_qty_vu_from_moneys(money_vals)
 
-    if valor_total <= 0:
+    if valor_total < 0:
+        return None
+    # Linha zerada (qty=0, total=0, VU opcional) permanece para auditoria — fora da ABC
+    if valor_total <= 0 and quantidade <= 0 and valor_unitario <= 0:
         return None
 
     # Unidade — só tokens reconhecidos (não roubar palavras da descrição)
@@ -727,6 +845,7 @@ def _parse_semantic_row(cells: list[str], page: int) -> RawBudgetRow | None:
         "quantidade": 0.0 if is_group else quantidade,
         "valor_unitario": 0.0 if is_group else valor_unitario,
         "valor_total": valor_total,
+        "bdi": bdi_pct if bdi_pct > 0 else 0.0,
     }
     if is_group:
         row = RawBudgetRow(

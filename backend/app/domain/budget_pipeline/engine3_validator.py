@@ -38,6 +38,8 @@ def _row_to_dict(row: RawBudgetRow) -> dict[str, Any]:
         "valor_unitario": row.valor_unitario,
         "valor_total": row.valor_total,
         "valor_total_com_bdi": row.valor_total,
+        "valor_unitario_sem_bdi": row.valor_unitario,
+        "bdi": row.bdi if row.bdi > 0 else 0.0,
         "tipo_linha": "grupo" if row.kind == "group" else "item",
         "tipo": "grupo" if row.kind == "group" else "item",
         "_source_page": row.page,

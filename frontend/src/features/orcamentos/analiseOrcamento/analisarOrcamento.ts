@@ -51,7 +51,14 @@ export function analisarLinhasOrcamento(
     toleranciaPercentual: contexto?.toleranciaPercentual ?? CONTEXTO_PADRAO.toleranciaPercentual,
   };
 
-  const linhas = linhasEntrada.map((linha) => analisarLinhaOrcamento(linha, contextoResolvido));
+  // Mesmo universo hierárquico dos cards ABC (pais com filhos ficam ignorados)
+  const allItemNumeros = linhasEntrada
+    .map((linha) => linha.itemNumero.trim())
+    .filter(Boolean);
+
+  const linhas = linhasEntrada.map((linha) =>
+    analisarLinhaOrcamento(linha, contextoResolvido, allItemNumeros),
+  );
 
   return {
     versaoModelo: ANALISE_ORCAMENTO_VERSAO,

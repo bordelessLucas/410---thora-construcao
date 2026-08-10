@@ -81,20 +81,13 @@ export function resolveTipoLinha(item: {
   const isGroupNum = /^\d+(?:\.\d+)?$/.test(itemNumero) && !isXyz;
   const total = Number(item.valorTotalComBdi ?? item.lineTotal ?? item.valor_total ?? 0);
 
-  // Tipado como item com valor = folha (inclui serviços ABC sem código SINAPI)
-  if (tipo === "item" && total > 0 && !/^GRUPO\b/i.test(descricao.trim())) {
-    return "item";
-  }
-
-  // Curva ABC / SINAPI: código de catálogo (4+ dígitos) com valor = item executivo
   const catalogCodeLike =
     Boolean(codigo) &&
     (/^\d{4,}(?:-.*)?$/i.test(codigo) || /^[A-Za-z]{1,4}\s*\d{2}/.test(codigo));
   const itemNumeroLooksLikeCatalog = /^\d{4,}$/.test(itemNumero);
+
+  // Curva ABC / SINAPI: código de catálogo (4+ dígitos) com valor = item executivo
   if ((catalogCodeLike || itemNumeroLooksLikeCatalog) && total > 0) {
-    return "item";
-  }
-  if (tipo === "item" && catalogCodeLike) {
     return "item";
   }
 
@@ -111,16 +104,21 @@ export function resolveTipoLinha(item: {
   const looksPricedLeaf =
     hasCatalogInDescription && total > 0 && !/^GRUPO\b/i.test(descricao.trim());
 
-  // X ou X.Y sem código de catálogo real = cabeçalho de grupo (sintético)
-  // Exceto quando a descrição já carrega código/banco de serviço precificado.
-  // Não tratar códigos SINAPI puros (≥4 dígitos) como grupo.
+  // X ou X.Y sem código de catálogo = cabeçalho/agregador (ex.: 10, 10.2, 14)
+  // Não promover a "item" só porque o backend mandou tipo=item + total.
   if (
     isGroupNum &&
     !itemNumeroLooksLikeCatalog &&
     !codigoSeemsCatalog &&
-    !looksPricedLeaf
+    !looksPricedLeaf &&
+    !catalogCodeLike
   ) {
     return "grupo";
+  }
+
+  // Tipado como item com valor = folha (Curva ABC sequencial / serviços sem hierarquia)
+  if (tipo === "item" && total > 0 && !/^GRUPO\b/i.test(descricao.trim())) {
+    return "item";
   }
 
   // NOVACAP: X.Y.Z com financeiro nunca é composição
@@ -138,7 +136,6 @@ export function resolveTipoLinha(item: {
     return "item";
   }
   if (isGroupNum) {
-    // Nº sequencial 1..N com valor e tipo=item (Curva ABC) não é cabeçalho de grupo
     if (tipo === "item" && total > 0) return "item";
     return "grupo";
   }
@@ -159,39 +156,82 @@ export function isHierarchyLeaf(
   return true;
 }
 
+/**
+ * Item elegível à Curva ABC = folha da árvore (sem filhos) com valor.
+ * Agregadores (10, 10.2, 12.3…) ficam na validação, mas NÃO entram no Pareto.
+ */
 export function isExecutiveItem(
   item: OrcamentoItem,
   allItemNumeros?: Iterable<string>,
 ): boolean {
-  const tipo = resolveTipoLinha(item);
-  const desc = item.description.toLowerCase();
+  const desc = String(item.description ?? "").toLowerCase();
   if (desc.includes("total do grupo")) return false;
   if (item.quarantine === true || item.abcEligible === false) return false;
   const total = Number(item.lineTotal ?? item.valorTotalComBdi ?? 0);
   if (total <= 0) return false;
+  const qty = Number(item.qty) || 0;
+  // Linha com quantidade zero (mesmo com VU de referência) não entra na ABC
+  if (qty <= 0) return false;
 
+  const numeros = allItemNumeros ?? [];
+  const num = getItemNumero(item);
+  // Regra estrutural: quem tem filhos é subtotal — fora da ABC
+  if (num && !isHierarchyLeaf(num, numeros)) {
+    return false;
+  }
+
+  const tipo = resolveTipoLinha(item);
   const codigo = String(item.catalogCode ?? "").trim();
   const catalogLike =
     /^\d{4,}(?:-.*)?$/i.test(codigo) || /^[A-Za-z]{1,4}\s*\d{2}/.test(codigo);
-  // Curva ABC / SINAPI: qualquer serviço precificado com código de catálogo entra
-  if (catalogLike) return true;
-  if (tipo !== "item") return false;
 
-  // Evita somar grupo + filhos (ex.: 1.2 + 1.2.1), mas mantém serviço
-  // precificado mesmo com filho fantasma por numeração inconsistente no PDF.
-  const numeros = allItemNumeros ?? [];
-  const num = getItemNumero(item);
-  if (num && !isHierarchyLeaf(num, numeros)) {
+  if (catalogLike) return true;
+  if (tipo === "composicao") return false;
+
+  if (tipo === "grupo") {
+    // Folha tipada como grupo (ex.: ART/Remoção sem SINAPI na ABC pronta):
+    // só entra se houver sinal de serviço precificado (qtd×VU).
     const qty = Number(item.qty) || 0;
     const vu =
-      Number(item.valorUnitarioComBdi) ||
-      Number(item.unitPrice) ||
-      0;
-    const priced =
-      qty > 0 && vu > 0 && (Boolean(codigo) || Math.abs(vu - total) > 0.02);
-    if (!priced) return false;
+      Number(item.valorUnitarioComBdi) || Number(item.unitPrice) || 0;
+    return qty > 0 && vu > 0;
   }
-  return true;
+
+  return tipo === "item";
+}
+
+/** Soma só das folhas ABC — base do Pareto. */
+export function somarItensCurvaAbc(
+  items: OrcamentoItem[],
+  allItemNumeros?: Iterable<string>,
+): number {
+  const nums =
+    allItemNumeros ?? items.map((item) => getItemNumero(item)).filter(Boolean);
+  return items
+    .filter((item) => isExecutiveItem(item, nums))
+    .reduce((acc, item) => acc + (Number(item.lineTotal) || 0), 0);
+}
+
+/**
+ * Detecta dupla contagem: soma das folhas ABC muito acima do total oficial.
+ */
+export function detectarDuplaContagemAbc(
+  somaFolhasAbc: number,
+  totalOficial: number,
+  toleranciaRelativa = 0.05,
+): { ok: boolean; diferenca: number; razao: number } {
+  const soma = Number(somaFolhasAbc) || 0;
+  const oficial = Number(totalOficial) || 0;
+  if (oficial <= 0 || soma <= 0) {
+    return { ok: true, diferenca: 0, razao: 0 };
+  }
+  const diferenca = soma - oficial;
+  const razao = diferenca / oficial;
+  return {
+    ok: razao <= toleranciaRelativa,
+    diferenca,
+    razao,
+  };
 }
 
 /** @deprecated Prefer parseBrl — mantido como alias. */
@@ -304,6 +344,24 @@ export function resolveStructuredItemPricing(
   );
 
   const tolerance = 0.02;
+
+  // Linha zerada do PDF: não inventar total a partir do unitário
+  if (qty <= 0 && vtCom <= 0) {
+    if (vuSem <= 0 && vuCom <= 0 && vuRaw > 0) vuSem = vuRaw;
+    if (vuCom <= 0 && vuSem > 0) vuCom = vuSem * (bdi > 0 ? 1 + bdi / 100 : 1);
+    if (vuSem <= 0 && vuCom > 0) vuSem = vuCom / (bdi > 0 ? 1 + bdi / 100 : 1);
+    return {
+      qty: 0,
+      bdi,
+      unitPrice: Math.round(vuSem * 1e6) / 1e6,
+      unitPriceComBdi: Math.round(vuCom * 1e6) / 1e6,
+      valorTotalSemBdi: 0,
+      valorTotalComBdi: 0,
+      quarantine: false,
+      alerts: [...alerts, "Linha com quantidade/total zero — fora da Curva ABC"],
+      confidence: 1,
+    };
+  }
 
   // Correção: total colado na quantidade (extração ABC) → usar Qtd×VU
   if (
